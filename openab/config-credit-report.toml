@@ -1,0 +1,35 @@
+# OpenAB config — Codex credit-report bridge (#聯徵報告製作).
+#
+# Discord token and channel ID come from ../.local/credit_report.env. The
+# root-only container entrypoint renders these placeholders into /run before
+# OpenAB starts and proves allowed_channels contains exactly the configured ID.
+# codex-acp never receives the token; it talks to the narrow local broker.
+
+[discord]
+bot_token = "${DISCORD_TOKEN_CREDIT_REPORT}"
+allowed_channels = [
+  "${CREDIT_REPORT_CHANNEL_ID}",
+]
+# Credit reports are sensitive and channel routing is explicit; DMs stay off.
+allow_dm = false
+allowed_users = [
+  "843428445802725388",   # anxxxiii (owner)
+  "1488170559865884684",  # qmini20
+]
+
+[agent]
+# Codex CLI does not implement `codex --acp`. The verified OpenAB Codex image
+# supplies @zed-industries/codex-acp, which drives the real Codex app-server.
+command = "/opt/credit-report/agent-entrypoint.sh"
+args = ["codex-acp"]
+working_dir = "/workspace/CreditReportSpace"
+env = { CREDIT_REPORT_BROKER_SOCKET = "/run/credit-report/discord.sock", CREDIT_REPORT_CHANNEL_ID = "${CREDIT_REPORT_CHANNEL_ID}", CREDIT_REPORT_WORKSPACE = "/workspace/CreditReportSpace", CREDIT_REPORT_INTAKE_ROOT = "/workspace/CreditReportSpace/tmp/docs/intake", CREDIT_REPORT_MAX_ATTACHMENT_BYTES = "26214400", CREDIT_REPORT_MAX_TOTAL_BYTES = "104857600", CREDIT_REPORT_MAX_ATTACHMENTS = "20", CREDIT_REPORT_MAX_OUTPUT_BYTES = "26214400" }
+
+[pool]
+# Report generation writes shared case files; serialize sessions to avoid races.
+max_sessions = 1
+session_ttl_hours = 4
+
+[reactions]
+enabled = true
+remove_after_reply = false

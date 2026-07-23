@@ -6,6 +6,7 @@
 #   openab-nvidia-lab    #nvidia-lab（qwen-code → NVIDIA NIM，實驗/免費勞力）
 #   openab-travel-nvidia #travel-planner 查證副手（同上殼）
 #   openab-travel-claude #travel-planner 行程彙整（Claude Max OAuth）
+#   openab-credit-report #聯徵報告製作（Codex CLI；PDF/圖片進、DOCX 回傳）
 #   steel-api / steel-ui 瀏覽器沙箱（讀網頁）＋ live viewer
 #   searxng              metasearch JSON API（搜尋）
 #
@@ -142,6 +143,40 @@ services:
       - ./config-astruct.toml:/etc/openab/config.toml:ro
 
   # ─────────────────────────────────────────────────────────────────────────
+  # #聯徵報告製作 — 真實 Codex CLI 後端。OpenAB 以 codex-acp（不是不存在的
+  # `codex --acp`）連 Codex app-server；專用 parent AGENTS.md 負責用
+  # sender_context 回抓 Discord 的 PDF/圖片附件，再把最終 DOCX 上傳原 thread。
+  #
+  # 預設 profile 關閉，避免尚未 bootstrap token/channel/auth 時，平常整包
+  # `docker compose up -d` 讓服務反覆失敗。部署見 CREDIT_REPORT_SETUP.md。
+  openab-credit-report:
+    profiles: ["credit-report"]
+    image: assistant-credit-report-codex:dev
+    build:
+      context: .
+      dockerfile: Dockerfile.credit-report
+    container_name: openab-credit-report
+    restart: unless-stopped
+    env_file:
+      # required:false 讓離線 `docker compose config` 與其他 profiles 維持可用；
+      # 真正啟動前 bootstrap 必須建立此 gitignored 檔案。
+      - path: ../.local/credit_report.env
+        required: false
+    environment:
+      - CREDIT_REPORT_WORKSPACE=/workspace/CreditReportSpace
+      - CREDIT_REPORT_INTAKE_ROOT=/workspace/CreditReportSpace/tmp/docs/intake
+      - CREDIT_REPORT_MAX_ATTACHMENT_BYTES=26214400
+      - CREDIT_REPORT_MAX_TOTAL_BYTES=104857600
+      - CREDIT_REPORT_MAX_ATTACHMENTS=20
+      - CREDIT_REPORT_MAX_OUTPUT_BYTES=26214400
+    volumes:
+      - "D:/discord 個人助理/CreditReportSpace:/workspace/CreditReportSpace"
+      # 專用 ChatGPT/Codex OAuth state；不與 AIQuant 或其他服務共用。
+      # 新 volume 預設 root-owned，首次 device auth 前依 SETUP chown 1000:1000。
+      - assistant_creditreport_codex_state:/home/node/.codex
+      - ./config-credit-report.toml:/etc/openab/config.toml:ro
+
+  # ─────────────────────────────────────────────────────────────────────────
   # Steel Browser — agent 讀網頁用的瀏覽器沙箱。設定手冊 STEEL_SETUP.md。
   # SECURITY：所有 host port 僅綁 127.0.0.1，禁止外露/轉發（同全域 9222 政策）。
   steel-api:
@@ -223,6 +258,9 @@ volumes:
   # A_struct 審核 bot 的獨立 Claude Pro state（非 external，compose 自建；首次 /login）。
   assistant_astruct_state:
     name: assistant_astruct_state
+  # 聯徵報告 bot 的獨立 Codex/ChatGPT OAuth state（首次 chown + device auth）。
+  assistant_creditreport_codex_state:
+    name: assistant_creditreport_codex_state
   # 估價 bot 的 qwen state（非 external，compose 自建；首次啟動前須 chown 1000）。
   assistant_estate_qwen_state:
     name: assistant_estate_qwen_state
