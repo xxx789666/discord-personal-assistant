@@ -1,0 +1,62 @@
+# Credit-report Discord bridge: verified OpenAB/Codex base plus the complete
+# deterministic CreditReportSpace runtime. Top-level Debian packages are pinned
+# so a repository update cannot silently change Python, DOCX, PDF, or rendering
+# behavior underneath the report workflow.
+FROM openab-codex:with-uv@sha256:0677ae0af7c0e8b805619129473b9a1e1d1562dae4bf460c29abc50343e2192c
+
+USER root
+ARG DEBIAN_FRONTEND=noninteractive
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+        python3=3.11.2-1+b1 \
+        python-is-python3=3.11.2-1+deb12u1 \
+        poppler-utils=22.12.0-2+deb12u2 \
+        libreoffice-writer=4:7.4.7-1+deb12u14 \
+        fonts-arphic-ukai=0.2.20080216.2-5 \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN mkdir -p /opt/credit-report /workspace /run/credit-report \
+    # The upstream image leaves ~/.config owned by root. LibreOffice runs as
+    # the node/Codex UID and needs a writable per-user profile below it.
+    && install -d -o node -g node -m 0750 \
+        /home/node/.config/libreoffice \
+        /home/node/.cache/fontconfig
+COPY credit-report/requirements.lock /opt/credit-report/requirements.lock
+RUN uv venv --python /usr/bin/python3 /opt/credit-report/venv \
+    && uv pip install --python /opt/credit-report/venv/bin/python \
+      --require-hashes -r /opt/credit-report/requirements.lock \
+    && /opt/credit-report/venv/bin/python -c "import docx, jsonschema, pytest; assert docx.__version__ == '1.2.0'; assert pytest.__version__ == '9.0.2'"
+ENV VIRTUAL_ENV=/opt/credit-report/venv
+ENV PATH="/opt/credit-report/venv/bin:${PATH}"
+COPY --chown=root:root credit-report/venv-profile.sh /etc/profile.d/credit-report-venv.sh
+RUN chmod 0644 /etc/profile.d/credit-report-venv.sh \
+    && bash -lc 'test "$(command -v python)" = /opt/credit-report/venv/bin/python && python -c "import docx, jsonschema, pytest; assert docx.__version__ == \"1.2.0\"; assert pytest.__version__ == \"9.0.2\""' \
+    && sh -lc 'test "$(command -v python)" = /opt/credit-report/venv/bin/python && python -c "import docx, jsonschema, pytest; assert docx.__version__ == \"1.2.0\"; assert pytest.__version__ == \"9.0.2\""'
+
+COPY credit-report/fontconfig-credit-report.conf /etc/fonts/conf.d/99-credit-report.conf
+RUN fc-cache -f \
+    && fc-match "標楷體" | grep -F "ukai.ttc"
+
+COPY --chown=node:node credit-report/discord-files.mjs /opt/credit-report/discord-files.mjs
+COPY --chown=root:root credit-report/discord-broker.mjs /opt/credit-report/discord-broker.mjs
+COPY --chown=root:root credit-report/discord-broker.integration.test.mjs /opt/credit-report/discord-broker.integration.test.mjs
+COPY --chown=root:root credit-report/runtime-config.mjs /opt/credit-report/runtime-config.mjs
+COPY --chown=root:root credit-report/agent-entrypoint.sh /opt/credit-report/agent-entrypoint.sh
+COPY --chown=root:root credit-report/container-entrypoint.sh /opt/credit-report/container-entrypoint.sh
+COPY --chown=node:node credit-report/AGENTS.md /workspace/AGENTS.md
+RUN chmod 0755 \
+        /opt/credit-report/agent-entrypoint.sh \
+        /opt/credit-report/container-entrypoint.sh \
+    && node --check /opt/credit-report/discord-files.mjs \
+    && node --check /opt/credit-report/discord-broker.mjs \
+    && node --check /opt/credit-report/runtime-config.mjs \
+    && node --test /opt/credit-report/discord-broker.integration.test.mjs \
+    && python -c "import docx; print(docx.__version__)" \
+    && command -v pdftoppm \
+    && command -v soffice
+
+# PID 1 and the Discord broker intentionally run as root so the node/Codex UID
+# cannot read their token-bearing environments through /proc. The configured
+# agent wrapper drops to UID/GID 1000 and removes the token before codex-acp.
+USER root
+ENTRYPOINT ["/opt/credit-report/container-entrypoint.sh"]

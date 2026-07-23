@@ -1,0 +1,6 @@
+# Mirrors CreditReportSpace's locked runtime/dev requirements used by the
+# read-only container integration smoke. Regenerate requirements.lock with:
+#   uv pip compile --generate-hashes requirements.in -o requirements.lock
+python-docx==1.2.0
+pytest==9.0.2
+jsonschema==4.26.0

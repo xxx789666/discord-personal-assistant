@@ -15,12 +15,17 @@
 - [KiroSpace/Notes/](KiroSpace/AGENTS.md) — Kiro（#kiro-assistant）的研究筆記
 - [LabSpace/Notes/](LabSpace/AGENTS.md) — NVIDIA 實驗頻道（#nvidia-lab）的產出
 
-### 系統文件（openab/，2026-06-13 全面更新為現況）
+### 聯徵報告（#聯徵報告製作）
+- `CreditReportSpace/` — PDF/圖片 intake、報告 agent 流程與 DOCX 成果
+- [CREDIT_REPORT_SETUP.md](openab/CREDIT_REPORT_SETUP.md) — Discord/Codex 整合、bootstrap、附件與 DOCX 回傳
+
+### 系統文件（openab/）
 - [README.md](openab/README.md) — **stack 總覽**（服務表、頻道map、白名單、volumes、維運指令）
 - [KIRO_SETUP.md](openab/KIRO_SETUP.md) — Kiro 助理（含直驅模式、AWS 重登）
 - [NVIDIA_SETUP.md](openab/NVIDIA_SETUP.md) — NVIDIA bridge（含七條踩坑紀錄）
 - [TRAVEL_SETUP.md](openab/TRAVEL_SETUP.md) — 旅遊系統（工作流、Claude 帳號管理）
 - [STEEL_SETUP.md](openab/STEEL_SETUP.md) — Steel + SearXNG（上網基礎設施）
+- [CREDIT_REPORT_SETUP.md](openab/CREDIT_REPORT_SETUP.md) — 聯徵報告 Codex/OpenAB 服務
 
 ## 🤖 頻道速查
 
@@ -30,6 +35,7 @@
 | #travel-planner | travel-claudebridge | 行程彙整            | TravelMemory/Trips/*/itinerary.md                       |
 | #travel-planner | Nvidia-bridge       | 查證副手（免費額度）      | research_notes.md                                       |
 | #nvidia-lab     | Nvidia-bridge       | 實驗、YouTube 逐字稿  | LabSpace/Notes/、Output/                                 |
+| #聯徵報告製作   | 專用 Codex bot（待 bootstrap） | PDF/圖片製作聯徵報告 | CreditReportSpace/、DOCX 回傳原 thread                  |
 
 ## ⚙️ 維運
 
@@ -40,12 +46,16 @@ docker compose -f "D:\discord 個人助理\openab\docker-compose.yml" stop
 
 # 看某隻 bot 的 log
 docker logs openab-kiro --tail 30
+
+# 聯徵服務是 opt-in profile；完成 token/channel/auth bootstrap 後才啟動
+docker compose -f "D:\discord 個人助理\openab\docker-compose.yml" `
+  --profile credit-report up -d openab-credit-report
 ```
 
-- 機密在 `.local/`（三個 bot token、NVIDIA key、Groq key）— 不要進 git
+- 機密在 `.local/`（bot tokens、channel bootstrap、NVIDIA key、Groq key）— 不要進 git
 - Steel live viewer（登入態任務人工介入）：http://localhost:5173
 - SearXNG 搜尋介面（人工除錯）：http://localhost:8081
 - **行程自動 PDF**：`pdf-publisher` 服務監看 `Trips/*/itinerary.md`，
   變動 ≤20 秒內自動轉 PDF 存回 trip 資料夾並發到 #travel-planner
 - 與 AIQuant 僅剩的依賴：base image `openab-codex:with-uv`
-- 四隻 bot 都可**私訊**（免 @）；頻道主訊息要 @、討論串內免 @
+- 既有助理可依各 config 使用私訊；聯徵 bot 基於敏感資料政策關閉 DM，只服務明確頻道
