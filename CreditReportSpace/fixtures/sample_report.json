@@ -1,0 +1,98 @@
+{
+  "meta": {
+    "section_title": "伍、金融借款：(仟元)",
+    "data_date": "資料日期-2026年6月底（TEST 測試資料）",
+    "source_note": "資料來源：財團法人金融聯合徵信中心信用報告。（本檔為去識別化虛構測試資料）"
+  },
+  "entities": [
+    {
+      "name": "虛構測試建設有限公司（TEST）",
+      "layout": "simple",
+      "groups": [
+        {
+          "role": "主債",
+          "rows": [
+            { "bank": "華銀/測試北", "item": "中擔", "loan_amount": 20000, "balance": 20000 },
+            { "bank": "華銀/測試北", "item": "短擔", "loan_amount": 8000, "balance": 8000 },
+            { "bank": "合庫/測試東", "item": "存單質押", "loan_amount": 12500, "balance": 12500 },
+            { "bank": "台企/測試中", "item": "中擔", "loan_amount": 150000, "balance": 148200 },
+            { "bank": "一銀/測試南", "item": "短擔", "loan_amount": 10000, "balance": 10000 }
+          ],
+          "total": { "loan_amount": 200500, "balance": 198700 }
+        }
+      ],
+      "notes": [
+        "申戶銀行往來四家，授信餘額為 198,700 仟。",
+        "相對前次往來主要增加新建案土建融借款，多以不動產借款為主。（虛構測試情境）"
+      ]
+    },
+    {
+      "name": "負責人-測試甲（虛構人名）",
+      "layout": "extended",
+      "prev_labels": ["2023", "2020.06"],
+      "groups": [
+        {
+          "role": "主債",
+          "rows": [
+            {
+              "bank": "土銀/測試一", "item": "中擔",
+              "loan_amount": 4000, "balance": 3900,
+              "prev_balances": [3950, 4000], "change": -50,
+              "note": "虛構市測試段土地"
+            },
+            {
+              "bank": "華銀/測試二", "item": "中擔",
+              "loan_amount": 80000, "balance": null,
+              "prev_balances": [0, 80000], "change": -80000,
+              "note": "轉貸至他行", "struck": true
+            },
+            {
+              "bank": "元大/測試三", "item": "中擔",
+              "loan_amount": 120000, "balance": null,
+              "prev_balances": [115000, null], "change": 115000,
+              "note": "虛構市測試段", "struck": true
+            }
+          ],
+          "total": {
+            "loan_amount": 4000, "balance": 3900,
+            "prev_balances": [3950, 4000], "change": 34950
+          }
+        },
+        {
+          "role": "從債",
+          "rows": [
+            {
+              "bank": "土銀/測試四", "item": "長擔",
+              "balance": 9800,
+              "prev_balances": [10500, 11200], "change": -700,
+              "note": "擔保測試乙（虛構測試段111建號）"
+            },
+            {
+              "bank": "土銀/測試五", "item": "長擔",
+              "balance": 18600,
+              "prev_balances": [19300, "N/A"], "change": -700,
+              "note": "擔保測試丙（虛構測試二街22巷）"
+            },
+            {
+              "bank": "合庫/測試六", "item": "中擔",
+              "balance": 7700,
+              "prev_balances": [8000, 8150], "change": -300,
+              "note": "擔保測試丙"
+            },
+            {
+              "bank": "板信/測試七", "item": "短擔",
+              "loan_amount": 9000, "balance": null,
+              "prev_balances": [0, 9000], "change": -9000,
+              "note": "影像模糊", "needs_review": true
+            }
+          ],
+          "total": {
+            "loan_amount": 9000, "balance": 36100,
+            "prev_balances": [37800, 28350], "change": -10700
+          }
+        }
+      ],
+      "notes": ["測試甲信用卡 6 張，繳款正常。（虛構測試情境）"]
+    }
+  ]
+}

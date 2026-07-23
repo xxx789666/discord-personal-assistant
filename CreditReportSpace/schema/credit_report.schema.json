@@ -1,0 +1,246 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "credit_report.schema.json",
+  "title": "金融借款報告（聯徵整理）結構化輸入",
+  "description": "由 LLM／人工從聯徵報告（PDF/圖片）抽取後的結構化資料。金額單位一律為仟元（新台幣）。所有不確定的值必須填 null 並將該列 needs_review 設為 true，嚴禁臆造。本 schema 僅承載去識別化後仍必要的欄位：不得放入身分證字號、統一編號、報表編號、完整帳號。期間語意：prev_balances[i] 為 prev_labels[i] 期末餘額（prev_labels[0] 為最近前期）；change = 本期餘額 − prev_balances[0]；刪除線（struck）沖轉列之 change 依聯徵慣例由人工填寫、不自動核對；total.change 為全部列（含沖轉列）change 之和。",
+  "type": "object",
+  "required": ["meta", "entities"],
+  "additionalProperties": false,
+  "properties": {
+    "meta": {
+      "type": "object",
+      "required": ["data_date"],
+      "additionalProperties": false,
+      "properties": {
+        "section_title": {
+          "type": "string",
+          "description": "頁首左側標題，預設「伍、金融借款：(仟元)」",
+          "default": "伍、金融借款：(仟元)"
+        },
+        "data_date": {
+          "type": "string",
+          "description": "頁首右側資料日期，例：「資料日期-2026年1月底」。只填年月精度，不要帶報表編號。",
+          "minLength": 1
+        },
+        "source_note": {
+          "type": "string",
+          "description": "報告末說明的資料來源句，預設「資料來源：財團法人金融聯合徵信中心信用報告。」"
+        }
+      }
+    },
+    "entities": {
+      "type": "array",
+      "minItems": 1,
+      "description": "報告主體，每個 entity 一個「◎」段（公司、負責人等）。",
+      "items": {
+        "type": "object",
+        "required": ["name", "layout", "groups"],
+        "additionalProperties": false,
+        "properties": {
+          "name": {
+            "type": "string",
+            "description": "段標題（不含◎），例：「虛構測試建設有限公司（TEST）」",
+            "minLength": 1
+          },
+          "layout": {
+            "type": "string",
+            "enum": ["simple", "extended"],
+            "description": "simple＝6欄（主/從債・往來銀行・項目・借款金額・借款餘額・備註）；extended＝9欄（另含兩期前次餘額與增減情形）。"
+          },
+          "prev_labels": {
+            "type": "array",
+            "items": { "type": "string", "minLength": 1 },
+            "minItems": 2,
+            "maxItems": 2,
+            "description": "extended 版兩個「前次餘額」欄的期別標籤，[0] 為最近前期，例：[\"2023\", \"2020.06\"]。layout=extended 時必填；simple 版禁止。"
+          },
+          "groups": {
+            "type": "array",
+            "minItems": 1,
+            "items": {
+              "type": "object",
+              "required": ["role", "rows"],
+              "additionalProperties": false,
+              "properties": {
+                "role": {
+                  "type": "string",
+                  "enum": ["主債", "從債"],
+                  "description": "本群組在「主/從債」欄顯示的身分。"
+                },
+                "rows": {
+                  "type": "array",
+                  "minItems": 1,
+                  "items": { "$ref": "#/definitions/row" }
+                },
+                "total": {
+                  "description": "本群組「合計」列。省略則不畫合計列。金額欄由工具用非刪除線列加總核對；change 用全列（含刪除線）加總核對；不一致列入警告。",
+                  "$ref": "#/definitions/total"
+                }
+              }
+            }
+          },
+          "notes": {
+            "type": "array",
+            "items": { "type": "string" },
+            "description": "表格下方「說明：」逐條文字（不含編號，工具自動編號）。"
+          }
+        },
+        "allOf": [
+          {
+            "if": { "properties": { "layout": { "const": "extended" } }, "required": ["layout"] },
+            "then": { "required": ["prev_labels"] }
+          },
+          {
+            "if": { "properties": { "layout": { "const": "simple" } }, "required": ["layout"] },
+            "then": {
+              "properties": {
+                "prev_labels": false,
+                "groups": {
+                  "items": {
+                    "properties": {
+                      "rows": {
+                        "items": {
+                          "properties": { "prev_balances": false, "change": false }
+                        }
+                      },
+                      "total": {
+                        "properties": { "prev_balances": false, "change": false }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        ]
+      }
+    }
+  },
+  "definitions": {
+    "amount": {
+      "description": "金額（仟元）。未知＝null（渲染為空白）。負值僅限 change 欄使用。",
+      "type": ["integer", "null"],
+      "minimum": 0
+    },
+    "optionalAmount": {
+      "description": "可選金額（仟元）：整數／null（未知，該列須 needs_review）／\"N/A\"（明確不適用，渲染「—」）。",
+      "anyOf": [
+        { "type": "integer", "minimum": 0 },
+        { "type": "null" },
+        { "const": "N/A" }
+      ]
+    },
+    "changeAmount": {
+      "description": "增減金額：整數（負數＝減少）／null（未知，該列須 needs_review）／\"N/A\"（明確不適用）。",
+      "anyOf": [
+        { "type": "integer" },
+        { "type": "null" },
+        { "const": "N/A" }
+      ]
+    },
+    "row": {
+      "type": "object",
+      "required": ["bank", "item", "balance"],
+      "additionalProperties": false,
+      "properties": {
+        "bank": {
+          "type": "string",
+          "minLength": 1,
+          "description": "往來銀行簡稱，格式「銀行簡稱/分行」。相鄰列同銀行會自動垂直合併儲存格。"
+        },
+        "item": {
+          "type": "string",
+          "minLength": 1,
+          "description": "項目簡稱：中擔／短擔／長擔／中放／存單質押…（對照表見 AGENTS.md）。"
+        },
+        "loan_amount": {
+          "$ref": "#/definitions/optionalAmount",
+          "description": "借款金額（額度）。不適用（如從債保證列）請省略欄位或填 \"N/A\"；null＝未知（該列須 needs_review）。"
+        },
+        "balance": {
+          "$ref": "#/definitions/amount",
+          "description": "本期借款餘額。必填；未知請明確填 null 並將該列 needs_review 設 true（沖轉列可改 struck）。"
+        },
+        "prev_balances": {
+          "type": "array",
+          "items": { "$ref": "#/definitions/optionalAmount" },
+          "minItems": 2,
+          "maxItems": 2,
+          "description": "extended 版兩期前次餘額，順序對應 entity.prev_labels（[0]＝最近前期）。該期無紀錄填 \"N/A\"（渲染「—」）；null＝未知（該列須 needs_review）。整欄不適用請省略欄位，不要填 null。simple 版禁止。"
+        },
+        "change": {
+          "$ref": "#/definitions/changeAmount",
+          "description": "增減情形（仟元）＝本期餘額 − prev_balances[0]。負數＝減少，渲染為 (絕對值)。非刪除線列三值皆已知時工具嚴格核對，不符為硬錯誤（needs_review 不得繞過）。simple 版禁止。"
+        },
+        "note": { "type": "string", "description": "備註（擔保人、擔保物、轉貸說明…）。" },
+        "struck": {
+          "type": "boolean",
+          "default": false,
+          "description": "true＝整列加刪除線（已結清／轉貸沖轉列）。金額欄合計核對不列入；change 由人工填寫、不自動核對。"
+        },
+        "needs_review": {
+          "type": "boolean",
+          "default": false,
+          "description": "true＝此列有值無法確認（影像模糊、欄位缺漏）。渲染時該列淡黃底並於備註加註「（待人工確認）」。"
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": { "balance": { "type": "null" } },
+            "required": ["balance"]
+          },
+          "then": { "$ref": "#/definitions/struckOrNeedsReview" }
+        },
+        {
+          "if": {
+            "properties": { "loan_amount": { "type": "null" } },
+            "required": ["loan_amount"]
+          },
+          "then": { "$ref": "#/definitions/struckOrNeedsReview" }
+        },
+        {
+          "if": {
+            "properties": { "change": { "type": "null" } },
+            "required": ["change"]
+          },
+          "then": { "$ref": "#/definitions/struckOrNeedsReview" }
+        },
+        {
+          "if": {
+            "properties": {
+              "prev_balances": { "contains": { "type": "null" } }
+            },
+            "required": ["prev_balances"]
+          },
+          "then": { "$ref": "#/definitions/struckOrNeedsReview" }
+        }
+      ]
+    },
+    "struckOrNeedsReview": {
+      "description": "未知（null）金額所在列必須是沖轉列或標記待人工確認。",
+      "anyOf": [
+        { "properties": { "struck": { "const": true } }, "required": ["struck"] },
+        { "properties": { "needs_review": { "const": true } }, "required": ["needs_review"] }
+      ]
+    },
+    "total": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "loan_amount": { "$ref": "#/definitions/amount" },
+        "balance": { "$ref": "#/definitions/amount" },
+        "prev_balances": {
+          "type": "array",
+          "items": { "$ref": "#/definitions/amount" },
+          "minItems": 2,
+          "maxItems": 2
+        },
+        "change": {
+          "type": ["integer", "null"],
+          "description": "全部列（含沖轉/刪除線列）change 之和。"
+        }
+      }
+    }
+  }
+}
