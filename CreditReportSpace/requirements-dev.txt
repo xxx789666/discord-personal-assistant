@@ -1,0 +1,4 @@
+# 測試依賴（鎖定版本）
+-r requirements.txt
+pytest==9.0.2
+jsonschema==4.26.0

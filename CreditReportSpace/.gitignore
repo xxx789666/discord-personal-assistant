@@ -1,0 +1,16 @@
+# 真實個資只會出現在這些目錄——永遠不進 git。
+# output/**：正式產出 DOCX；tmp/**：Discord intake（tmp/docs/intake/）、
+# 渲染 PNG 等所有中間檔。
+output/**
+tmp/**
+!output/**/
+!tmp/**/
+!output/**/.gitkeep
+!tmp/**/.gitkeep
+
+# 舊版 helper 曾用過的收件目錄；即使殘留也不得進 git
+.discord-inbox/
+
+__pycache__/
+*.py[cod]
+.pytest_cache/
