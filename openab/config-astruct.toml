@@ -1,0 +1,39 @@
+# OpenAB config — Claude Code bridge (#a-struct，A_struct 夜盤閘門法審核)
+#
+# 沿用 config-travel-claude.toml schema。角色定義在 vault 根 AGENTS.md：
+# 讀 forward/Astruct_queue.csv、解析使用者自然語言審核、append forward/Astruct_decisions.csv。
+# 硬規則:NEVER set ANTHROPIC_API_KEY（Claude Code 會棄 OAuth 改走 API 計費）。
+
+[discord]
+bot_token = "${DISCORD_TOKEN_ASTRUCT}"
+allowed_channels = [
+  "1518874308716265643",  # #a-struct（AA-agent 伺服器）
+]
+allow_dm = true
+allowed_users = [
+  "843428445802725388",   # anxxxiii（owner）
+  "1488170559865884684",  # qmini20
+  "1518887400498266112",  # A_struct 測試帳號（2026-06-23 加）
+]
+
+[agent]
+command = "claude-agent-acp"
+args = []
+# AStructSpace vault（docker-compose 掛載）。forward/ 子目錄是 lab 的
+# data/forward（queue/decisions 在此）。角色見 AGENTS.md。
+working_dir = "/workspace/AStructSpace"
+
+[pool]
+max_sessions = 1
+session_ttl_hours = 2
+
+[reactions]
+enabled = true
+remove_after_reply = false
+
+[stt]
+enabled = true
+api_key = "${GROQ_API_KEY}"
+model = "whisper-large-v3-turbo"
+base_url = "https://api.groq.com/openai/v1"
+echo_transcript = true

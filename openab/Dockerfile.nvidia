@@ -1,0 +1,17 @@
+# NVIDIA bridge image — qwen-code shell over NVIDIA NIM.
+#
+# Why not codex-acp (the first attempt, 2026-06-12): codex CLI removed
+# `wire_api = "chat"` in Feb 2026 (openai/codex discussion #7782) and NIM has
+# no /v1/responses endpoint, so codex can no longer talk to OpenAI-compatible
+# chat providers. qwen-code is a gemini-cli fork: native ACP (`qwen --acp`,
+# same proven wiring as the old gemini bridge) + OpenAI-compatible providers
+# via OPENAI_API_KEY / OPENAI_BASE_URL / OPENAI_MODEL env.
+#
+# Base: openab-codex:with-uv — gives us the openab orchestrator + uv (needed
+# by the workspace tools/*.py). The codex CLI inside is simply unused.
+# Build: docker build -f Dockerfile.nvidia -t openab-nvidia:qwen .
+FROM openab-codex:with-uv
+
+USER root
+RUN npm install -g @qwen-code/qwen-code && qwen --version
+USER node

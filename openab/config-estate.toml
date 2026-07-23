@@ -1,0 +1,52 @@
+# OpenAB config — 不動產估價 bridge（#不動產估價，實價登錄比價估價）
+#
+# 殼與 nvidia-lab 相同：qwen-code（`qwen --acp`）→ NVIDIA NIM 免費端點。
+# 沿用 nvidia-bridge 這個 bot 應用（同一個 DISCORD_TOKEN_NVIDIA）作第三個
+# 容器 —— 與 openab-nvidia-lab / openab-travel-nvidia 是同一 token、不同容器、
+# allowed_channels 互斥，所以三個容器不會互相重複回覆。
+# （bot 在頻道顯示名仍是 Nvidia-bridge；要獨立名稱再開新 Discord 應用換 token。）
+#
+# 角色：估價助理。標示部由使用者人工提供（pqt 地政電傳付費且禁自動化），
+# bot 只做「內政部實價登錄 open data 比價 + 估價計算」。SOP 見
+# EstateSpace/AGENTS.md，工具用法見 EstateSpace/WebAccess.md。
+
+[discord]
+bot_token = "${DISCORD_TOKEN_NVIDIA}"
+allowed_channels = [
+  "1517804694901362752",  # #不動產估價（AA-agent 伺服器，2026-06-20 API 建立）
+]
+# 私訊免 @ ＋ 使用者白名單 — 同其他 bridges。
+allow_dm = true
+allowed_users = [
+  "843428445802725388",   # anxxxiii（owner）
+  "1488170559865884684",  # qmini20
+]
+
+[agent]
+command = "qwen"
+args = ["--acp"]
+# EstateSpace 是唯一掛載的工作區（docker-compose.yml）。AGENTS.md 定義角色與
+# 估價 SOP（QWEN.md 轉指過去），WebAccess.md 是 tools/lvr.py 用法。
+working_dir = "/workspace/EstateSpace"
+# 注入 qwen 子行程的變數（同 config-nvidia-lab.toml）：
+#   OPENAI_API_KEY/BASE_URL/MODEL — qwen-code 的 OpenAI 相容供應商三件套，
+#     指向 NVIDIA NIM（key 來自 ../.local/nvidia.env）。換模型改 OPENAI_MODEL。
+#   GROQ_API_KEY — Discord 語音轉文字（[stt]）用。
+env = { OPENAI_API_KEY = "${NVIDIA_API_KEY}", OPENAI_BASE_URL = "https://integrate.api.nvidia.com/v1", OPENAI_MODEL = "minimaxai/minimax-m3", GROQ_API_KEY = "${GROQ_API_KEY}" }
+
+[pool]
+# 同 nvidia-lab：max_sessions=1 時主頻道與討論串會搶唯一槽位而靜默無回應。
+max_sessions = 2
+session_ttl_hours = 2
+
+[reactions]
+enabled = true
+remove_after_reply = false
+
+# 語音訊息轉文字 — 同其他 bridges 的 Groq whisper 設定。
+[stt]
+enabled = true
+api_key = "${GROQ_API_KEY}"
+model = "whisper-large-v3-turbo"
+base_url = "https://api.groq.com/openai/v1"
+echo_transcript = true

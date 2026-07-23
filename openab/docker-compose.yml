@@ -1,0 +1,253 @@
+# Discord 個人助理 compose stack — 2026-06-12 自 D:\AIQuant\openab 獨立出來，
+# 與 quant stack 完全分離（不同 compose 專案、不同網路、不同 .local）。
+#
+# 服務：
+#   openab-kiro          #kiro-assistant（Kiro CLI，通用助理＋旅遊查證主力）
+#   openab-nvidia-lab    #nvidia-lab（qwen-code → NVIDIA NIM，實驗/免費勞力）
+#   openab-travel-nvidia #travel-planner 查證副手（同上殼）
+#   openab-travel-claude #travel-planner 行程彙整（Claude Max OAuth）
+#   steel-api / steel-ui 瀏覽器沙箱（讀網頁）＋ live viewer
+#   searxng              metasearch JSON API（搜尋）
+#
+# 機密在 ../.local/*.env（gitignore）。與 AIQuant 僅剩的依賴：
+#   - base image openab-codex:with-uv（Dockerfile.nvidia 的 FROM，quant 那邊
+#     build 的；若被刪，照 AIQuant openab/Dockerfile.codex.ext 重建）
+#   - Claude OAuth 掛載 C:/Users/xx/.claude（host 層級，非 AIQuant）
+#
+# Named volumes 沿用 aiquant_* 舊名（歷史包袱，改名會丟 Kiro AWS 登入與
+# Steel cookies — 不值得）。全部 external：搬到新機器要先 docker volume create。
+name: discord-assistant
+
+services:
+  # ─────────────────────────────────────────────────────────────────────────
+  # #kiro-assistant — Kiro CLI（原生 ACP）。設定手冊 KIRO_SETUP.md。
+  openab-kiro:
+    # 衍生 image（2026-06-12）：上游 openab 預設 image（digest 釘在
+    # Dockerfile.kiro 的 FROM）+ python3/ffmpeg/yt-dlp/youtube-transcript-api
+    # — 給 KiroSpace/tools/yt.py 做 YouTube 逐字稿（同 quant intake 能力）。
+    image: openab-kiro:tools
+    build:
+      context: .
+      dockerfile: Dockerfile.kiro
+    container_name: openab-kiro
+    restart: unless-stopped
+    env_file:
+      - ../.local/discord_token.env
+      - ../.local/groq.env          # GROQ_API_KEY — [stt] 語音轉文字
+    volumes:
+      - "D:/discord 個人助理/KiroSpace:/workspace/KiroSpace"
+      # 旅遊 vault：Kiro 是旅遊查證主力，成果寫 Trips/<slug>/research_notes.md
+      # （KiroSpace/AGENTS.md §跨頻道 + .kiro/steering/travel/）。
+      - "D:/discord 個人助理/TravelMemory:/workspace/TravelMemory"
+      # Kiro 狀態 + AWS Builder ID 憑證（device-flow 登入過；down -v 會丟）。
+      - aiquant_kiro_state:/home/agent/.kiro
+      - aiquant_kiro_auth:/home/agent/.local/share/kiro-cli
+      - ./config-kiro.toml:/etc/openab/config.toml:ro
+
+  # ─────────────────────────────────────────────────────────────────────────
+  # #nvidia-lab — qwen-code 殼 → NVIDIA NIM 免費模型。設定手冊 NVIDIA_SETUP.md。
+  # 歷史：codex-acp 殼因 codex 移除 chat API 而不可用（NVIDIA_SETUP §7）。
+  openab-nvidia-lab:
+    image: openab-nvidia:qwen
+    build:
+      context: .
+      dockerfile: Dockerfile.nvidia
+    container_name: openab-nvidia-lab
+    restart: unless-stopped
+    env_file:
+      - ../.local/discord_token.env
+      - ../.local/nvidia.env        # NVIDIA_API_KEY
+      - ../.local/groq.env
+    volumes:
+      - "D:/discord 個人助理/LabSpace:/workspace/LabSpace"
+      # qwen 狀態（含 output-language.md 強制繁中 — NVIDIA_SETUP §7 坑 2；
+      # 新 volume 要 chown 1000:1000 — NVIDIA_SETUP §4）。
+      - aiquant_nvidialab_qwen_state:/home/node/.qwen
+      - ./config-nvidia-lab.toml:/etc/openab/config.toml:ro
+
+  openab-travel-nvidia:
+    image: openab-nvidia:qwen
+    container_name: openab-travel-nvidia
+    restart: unless-stopped
+    env_file:
+      - ../.local/discord_token.env
+      - ../.local/nvidia.env
+      - ../.local/groq.env
+    volumes:
+      - "D:/discord 個人助理/TravelMemory:/workspace/TravelMemory"
+      - aiquant_travelnvidia_qwen_state:/home/node/.qwen
+      - ./config-travel-nvidia.toml:/etc/openab/config.toml:ro
+
+  # ─────────────────────────────────────────────────────────────────────────
+  # #不動產估價 — qwen-code 殼 → NVIDIA NIM（2026-06-20）。第三個共用
+  # nvidia-bridge token 的容器（allowed_channels 與另兩個互斥）。角色：實價
+  # 登錄 open data 比價估價；標示部由使用者人工貼（不碰付費的 pqt 地政電傳）。
+  # SOP 見 EstateSpace/AGENTS.md。新 qwen state volume 首次啟動前需 chown
+  # 1000:1000（坑 2），並 docker cp 繁中 output-language.md（坑 4）。
+  openab-estate:
+    image: openab-nvidia:qwen
+    container_name: openab-estate
+    restart: unless-stopped
+    env_file:
+      - ../.local/discord_token.env
+      - ../.local/nvidia.env        # NVIDIA_API_KEY
+      - ../.local/groq.env
+    volumes:
+      - "D:/discord 個人助理/EstateSpace:/workspace/EstateSpace"
+      - assistant_estate_qwen_state:/home/node/.qwen
+      - ./config-estate.toml:/etc/openab/config.toml:ro
+
+  # ─────────────────────────────────────────────────────────────────────────
+  # #travel-planner 彙整 — Claude Code，用「獨立的 Pro 帳號」（2026-06-12 改）：
+  # 不再共用 host ~/.claude（那是 quant 用的 Max 帳號），改掛專屬 named
+  # volume，容器內 `claude` 登入流程寫入 OAuth state（會自動 refresh）。
+  # 重登方式：docker exec -it openab-travel-claude claude → /login。
+  # 硬規則不變：絕不設 ANTHROPIC_API_KEY（Claude Code 會棄 OAuth 改走 API 計費）。
+  openab-travel-claude:
+    # Pinned digest of ghcr.io/openabdev/openab-claude:latest as of 2026-05-15.
+    image: ghcr.io/openabdev/openab-claude@sha256:3d2017efbf1ab9702a9e3e7eaccb50e1147488cad04517ba50f29f63fd07d0ab
+    container_name: openab-travel-claude
+    restart: unless-stopped
+    env_file:
+      - ../.local/discord_token.env
+      - ../.local/groq.env
+    volumes:
+      - "D:/discord 個人助理/TravelMemory:/workspace/TravelMemory"
+      # 專屬 Claude 帳號 state（rw — OAuth token 要能自動 refresh）。
+      # down -v 不會清（external）；真要換帳號就重跑 /login。
+      - assistant_travelclaude_state:/home/node/.claude
+      - ./config-travel-claude.toml:/etc/openab/config.toml:ro
+
+  # ─────────────────────────────────────────────────────────────────────────
+  # #a-struct — Claude Code，A_struct 夜盤閘門法審核（2026-06-23）。
+  # 推送由 lab 端 Astruct_daily.py(webhook) 負責；本 bot 只做自然語言審核：
+  # 讀 forward/Astruct_queue.csv、append forward/Astruct_decisions.csv（AGENTS.md）。
+  # forward/ = lab 的 data/forward 掛進來（巢狀 bind mount）。專屬 Claude
+  # state volume，首次啟動需 docker exec -it openab-astruct claude → /login。
+  openab-astruct:
+    image: ghcr.io/openabdev/openab-claude@sha256:3d2017efbf1ab9702a9e3e7eaccb50e1147488cad04517ba50f29f63fd07d0ab
+    container_name: openab-astruct
+    restart: unless-stopped
+    # TZ=Asia/Taipei（2026-06-25）：容器預設 UTC 會讓 bot 寫進 decisions.csv 的
+    # ts 比實際早 8h（偽裝遲到的審核成早就決定）。固定台北時，與 lab/VPS 全一致。
+    environment:
+      - TZ=Asia/Taipei
+    env_file:
+      - ../.local/discord_token.env
+      - ../.local/groq.env
+    volumes:
+      - "D:/discord 個人助理/AStructSpace:/workspace/AStructSpace"
+      - "C:/Users/xx/Desktop/tmf-strategy-lab-main/tmf-strategy-lab-main/data/forward:/workspace/AStructSpace/forward"
+      - assistant_astruct_state:/home/node/.claude
+      - ./config-astruct.toml:/etc/openab/config.toml:ro
+
+  # ─────────────────────────────────────────────────────────────────────────
+  # Steel Browser — agent 讀網頁用的瀏覽器沙箱。設定手冊 STEEL_SETUP.md。
+  # SECURITY：所有 host port 僅綁 127.0.0.1，禁止外露/轉發（同全域 9222 政策）。
+  steel-api:
+    # Pinned digest of ghcr.io/steel-dev/steel-browser-api:latest, 2026-06-12.
+    image: ghcr.io/steel-dev/steel-browser-api@sha256:6b65d776e17950c804c92fa49b66b5b1a335e997786fbc2a80cc11cdd650982e
+    container_name: steel-api
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:3000:3000"   # REST API
+      - "127.0.0.1:9223:9223"   # CDP — loopback only, NEVER expose
+    volumes:
+      - aiquant_steel_logs:/data/logs
+      - aiquant_steel_exports:/tmp/steel-browser-exports
+      - aiquant_steel_cache:/app/.cache   # Chrome cookies/登入態
+    environment:
+      - DOMAIN=localhost:3000
+      - CDP_DOMAIN=localhost:9223
+      - LOG_STORAGE_ENABLED=true
+      - LOG_STORAGE_PATH=/data/logs/browser-logs.duckdb
+      # WORKAROUND（2026-06-12）：上游 fingerprint bug（steel#294/#295/#302）
+      # 致 Chrome 啟動全滅；此旗標停用反偵測層（搜尋引擎因此會擋 — 搜尋
+      # 已改走 searxng）。上游修復後移除＋換 digest。
+      - SKIP_FINGERPRINT_INJECTION=true
+
+  steel-ui:
+    # Pinned digest of ghcr.io/steel-dev/steel-browser-ui:latest, 2026-06-12.
+    image: ghcr.io/steel-dev/steel-browser-ui@sha256:d356f19d0dba3297f5b3a3d431650477b20e3fe95be8b201092eda2af41e624b
+    container_name: steel-ui
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:5173:80"     # live viewer（登入態任務的人工介入窗口）
+    environment:
+      - API_URL=http://localhost:3000   # UI 跑在 host 瀏覽器，走 host 口
+    depends_on:
+      - steel-api
+
+  # ─────────────────────────────────────────────────────────────────────────
+  # SearXNG — 搜尋 JSON API（搜尋引擎結果頁會擋 headless，故自架）。
+  searxng:
+    # Pinned digest of searxng/searxng:latest as of 2026-06-12.
+    image: searxng/searxng@sha256:2008614c3dfba2baf7971503a8680a9799c59b144a3d9675b5f985d68917472b
+    container_name: searxng
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:8081:8080"   # 人工除錯用；loopback only
+    volumes:
+      - ./searxng-settings.yml:/etc/searxng/settings.yml:ro
+
+  # ─────────────────────────────────────────────────────────────────────────
+  # pdf-publisher — 行程自動轉 PDF 發 Discord（2026-06-12，使用者需求：
+  # #travel-planner 輸出行程時自動附 PDF）。確定性監看，不依賴 LLM 記得：
+  # 輪詢 vault 的 Trips/*/itinerary.md → 變動就 md→HTML →（內部 HTTP 給
+  # Steel 抓）→ /v1/pdf 真 Chrome 渲染（CJK 字型已驗證）→ PDF 存回 vault
+  # ＋以 travel-claudebridge 身分上傳到頻道。詳見 pdf-publisher/publish.py。
+  pdf-publisher:
+    image: assistant-pdf-publisher:dev
+    build:
+      context: ./pdf-publisher
+      dockerfile: Dockerfile
+    container_name: pdf-publisher
+    restart: unless-stopped
+    env_file:
+      - ../.local/discord_token.env   # DISCORD_TOKEN_TRAVEL_CLAUDE（上傳身分）
+    environment:
+      - CHANNEL_ID=1514819240631206072   # #travel-planner
+    volumes:
+      - "D:/discord 個人助理/TravelMemory:/vault"
+      - assistant_pdfpub_state:/state    # 已發佈 hash — 重啟不重發
+    depends_on:
+      - steel-api
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Named volumes — 全部沿用既有 volume（external），名稱含 aiquant_ 為歷史包袱。
+# 新機器重建：docker volume create <name> 之後照各 SETUP 文件 bootstrap。
+volumes:
+  # pdf-publisher 的已發佈狀態（非 external — compose 自建，root 行程可寫）。
+  assistant_pdfpub_state:
+    name: assistant_pdfpub_state
+  # A_struct 審核 bot 的獨立 Claude Pro state（非 external，compose 自建；首次 /login）。
+  assistant_astruct_state:
+    name: assistant_astruct_state
+  # 估價 bot 的 qwen state（非 external，compose 自建；首次啟動前須 chown 1000）。
+  assistant_estate_qwen_state:
+    name: assistant_estate_qwen_state
+  # travel-claude 的獨立 Pro 帳號 OAuth state（2026-06-12 與 host Max 帳號分家）。
+  assistant_travelclaude_state:
+    name: assistant_travelclaude_state
+    external: true
+  aiquant_kiro_state:
+    name: aiquant_kiro_state
+    external: true
+  aiquant_kiro_auth:
+    name: aiquant_kiro_auth
+    external: true
+  aiquant_nvidialab_qwen_state:
+    name: aiquant_nvidialab_qwen_state
+    external: true
+  aiquant_travelnvidia_qwen_state:
+    name: aiquant_travelnvidia_qwen_state
+    external: true
+  aiquant_steel_logs:
+    name: aiquant_steel_logs
+    external: true
+  aiquant_steel_exports:
+    name: aiquant_steel_exports
+    external: true
+  aiquant_steel_cache:
+    name: aiquant_steel_cache
+    external: true

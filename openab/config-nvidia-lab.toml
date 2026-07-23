@@ -1,0 +1,63 @@
+# OpenAB config — NVIDIA bridge (#nvidia-lab，免費開源模型實驗頻道)
+#
+# 殼：qwen-code（gemini-cli fork，原生 ACP — 接法同舊 gemini bridge 的
+# `gemini --acp`，2026-06-13 對 openab 實測）。模型/端點用 OPENAI_* 環境
+# 變數注入（qwen-code 官方支援的 OpenAI 相容供應商設定）。
+#
+# 歷史：第一版用 codex-acp，部署當天（2026-06-12）發現 codex CLI 已於
+# 2026-02 移除 wire_api="chat"（openai/codex discussion #7782），而 NIM 無
+# /v1/responses → 一啟動就斷線（"Connection Lost"）。換 qwen-code 解決；
+# codex-nvidia-config.toml 與兩個 codex state volumes 因此作廢。
+#
+# 角色：免費勞力層。模型是 NVIDIA NIM 免費端點上的開源模型（kimi-k2.6），
+# 額度歸 NVIDIA 免費層 — 不吃 Max / ChatGPT 訂閱額度。
+
+[discord]
+bot_token = "${DISCORD_TOKEN_NVIDIA}"
+# #nvidia-lab — 建好頻道後把真實 ID 填進來（NVIDIA_SETUP.md §3）。
+# 注意：nvidia-bridge 這個 bot 應用同時服務 #nvidia-lab（本 config）與
+# #travel-planner（config-travel-nvidia.toml）— 同一個 token、兩個容器、
+# allowed_channels 互斥，所以不會重複回覆。
+allowed_channels = [
+  "1514819234448933117",  # #nvidia-lab（AA-agent 伺服器，2026-06-12 API 建立）
+]
+# 私訊免 @ ＋ 使用者白名單 — 說明見 config-kiro.toml 同段。
+allow_dm = true
+allowed_users = [
+  "843428445802725388",   # anxxxiii（owner）
+  "1488170559865884684",  # qmini20
+]
+
+[agent]
+command = "qwen"
+args = ["--acp"]
+# LabSpace 是唯一掛載的工作區（docker-compose.yml）。AGENTS.md 定義角色
+# （QWEN.md 轉指過去），WebAccess.md 是 Steel Browser 上網 cookbook。
+working_dir = "/workspace/LabSpace"
+# 注入 qwen 子行程的變數（[agent].env 是上游驗證過的注入方式）：
+#   OPENAI_API_KEY/BASE_URL/MODEL — qwen-code 的 OpenAI 相容供應商三件套，
+#     指向 NVIDIA NIM（key 來自 ../.local/nvidia.env）。換模型改 OPENAI_MODEL。
+#   GROQ_API_KEY — tools/yt.py 的 YouTube 無字幕 STT 退路用（Whisper API，
+#     同一把 key 也被 OpenAB 本身的 [stt] 用於 Discord 語音）
+env = { OPENAI_API_KEY = "${NVIDIA_API_KEY}", OPENAI_BASE_URL = "https://integrate.api.nvidia.com/v1", OPENAI_MODEL = "minimaxai/minimax-m3", GROQ_API_KEY = "${GROQ_API_KEY}" }
+
+[pool]
+# 2026-06-12 從 1 升到 2：max_sessions=1 時，第一個討論串在 TTL 內占住唯一
+# session 槽，主頻道再 @ 一次會靜默無回應（log 無 spawn）— 實測踩到。
+# qwen 子行程每個約 2-400MB，2 個對本機可承受；要再升先看 RAM。
+max_sessions = 2
+session_ttl_hours = 2
+
+[reactions]
+enabled = true
+remove_after_reply = false
+
+# 語音訊息轉文字 — 同其他 bridges 的 Groq whisper 設定。
+# GROQ_API_KEY 來自 ../.local/agent_token.env（QUANTDINGER_* 不進 agent
+# 子行程 — 不在 env / inherit_env 清單）。
+[stt]
+enabled = true
+api_key = "${GROQ_API_KEY}"
+model = "whisper-large-v3-turbo"
+base_url = "https://api.groq.com/openai/v1"
+echo_transcript = true

@@ -1,0 +1,56 @@
+# OpenAB config — NVIDIA bridge (#travel-planner，即時旅遊資訊查證)
+#
+# 2026-06-12 取代 config-travel-gemini.toml：免費層 Gemini CLI 於 2026-06-18
+# 被 Antigravity CLI 取代（geminicli.com quota 頁公告），`gemini --acp` 免費
+# 路線確定斷頭；免費 API key 又只給 Flash（250 次/天）。改用 NVIDIA NIM
+# 免費端點上的開源模型（kimi-k2.6）+ codex-acp 殼 + Steel Browser 查證。
+#
+# 殼：qwen-code（`qwen --acp`，OPENAI_* 環境變數指向 NIM）— 說明與
+# codex-acp 換殼的歷史見 config-nvidia-lab.toml 頭部。
+# 與 lab 版差異只有：頻道、working_dir。
+
+[discord]
+bot_token = "${DISCORD_TOKEN_NVIDIA}"
+# #travel-planner — 與 config-travel-claude.toml 填同一個頻道 ID。
+# 同一個 nvidia-bridge bot 應用也服務 #nvidia-lab（config-nvidia-lab.toml），
+# 兩容器 allowed_channels 互斥。
+allowed_channels = [
+  "1514819240631206072",  # #travel-planner（AA-agent 伺服器，2026-06-12 API 建立）
+]
+# 私訊免 @ ＋ 使用者白名單 — 說明見 config-kiro.toml 同段。
+allow_dm = true
+allowed_users = [
+  "843428445802725388",   # anxxxiii（owner）
+  "1488170559865884684",  # qmini20
+]
+# ── 雙 bot 協作（可選，先停用）────────────────────────────────────────────
+# 讓 Claude bot 能 @mention 這隻接力查證（反之亦然）。啟用方式見
+# TRAVEL_SETUP.md §6；上游 max_bot_turns 預設 5 輪防無限迴圈。
+# allow_bot_messages = "mentions"
+# trusted_bot_ids = ["REPLACE_WITH_TRAVEL_CLAUDE_BOT_ID"]
+
+[agent]
+command = "qwen"
+args = ["--acp"]
+# TravelMemory vault（docker-compose.yml 掛載），與 Claude bot 共用。
+# AGENTS.md 定義角色分工（QWEN.md 轉指過去）；WebAccess.md 是查證 cookbook。
+working_dir = "/workspace/TravelMemory"
+# 注入 qwen 子行程的變數（說明見 config-nvidia-lab.toml）。
+env = { OPENAI_API_KEY = "${NVIDIA_API_KEY}", OPENAI_BASE_URL = "https://integrate.api.nvidia.com/v1", OPENAI_MODEL = "minimaxai/minimax-m3", GROQ_API_KEY = "${GROQ_API_KEY}" }
+
+[pool]
+# 升到 2 的原因見 config-nvidia-lab.toml [pool] 註解（2026-06-12）。
+max_sessions = 2
+session_ttl_hours = 2
+
+[reactions]
+enabled = true
+remove_after_reply = false
+
+# 語音訊息轉文字 — 同其他 bridges 的 Groq whisper 設定。
+[stt]
+enabled = true
+api_key = "${GROQ_API_KEY}"
+model = "whisper-large-v3-turbo"
+base_url = "https://api.groq.com/openai/v1"
+echo_transcript = true

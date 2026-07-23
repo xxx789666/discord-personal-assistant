@@ -1,0 +1,22 @@
+# Local secrets and credentials
+.local/
+估價頻道.txt
+
+# Sensitive source documents supplied as report references
+聯徵報告範例/
+
+# Local editor state
+.obsidian/workspace.json
+.obsidian/workspace-mobile.json
+
+# Python / Node generated files
+**/__pycache__/
+*.py[cod]
+node_modules/
+EstateSpace/tools/.lvr_cache/
+
+# Generated and temporary files
+*.tmp
+*.log
+.DS_Store
+Thumbs.db

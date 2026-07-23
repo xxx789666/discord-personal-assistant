@@ -1,0 +1,7 @@
+{
+  "dependencies": {
+    "adm-zip": "^0.5.17",
+    "md-to-pdf": "^5.2.5",
+    "pdfkit": "^0.19.1"
+  }
+}

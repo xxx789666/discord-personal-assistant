@@ -1,0 +1,19 @@
+# SearXNG settings for the openab stack (mounted ro by docker-compose.yml).
+# Purpose: self-hosted metasearch JSON API for the agents — search-engine
+# result pages (Google / DuckDuckGo) CAPTCHA-block Steel's headless Chrome
+# (anti-detection layer disabled per STEEL_SETUP.md §3), so agents query
+# SearXNG instead: http://searxng:8080/search?q=...&format=json
+# Loopback-only on the host (127.0.0.1:8081) — do NOT expose externally.
+use_default_settings: true
+
+server:
+  # Local-only instance; secret still set to a random value (2026-06-12).
+  secret_key: "QIy6fUVhFo0dXKsA8tWZDxi92S3MErNvmOJ5RujHqLneC4kT"
+  limiter: false
+
+search:
+  # json is required for the tools/web.py `search` subcommand; html kept for
+  # human debugging via the browser at http://localhost:8081
+  formats:
+    - html
+    - json

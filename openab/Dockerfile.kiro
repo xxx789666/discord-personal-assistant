@@ -1,0 +1,19 @@
+# Kiro bridge image — 在上游 openab 預設 image 上加 YouTube 轉錄工具鏈
+# （2026-06-12，使用者需求：Kiro 也要能影片→逐字稿，同 quant intake 能力）。
+#
+# 加裝：python3 + ffmpeg（apt）、yt-dlp + youtube-transcript-api + requests
+# （pip）。KiroSpace/tools/yt.py 用 `python3 tools/yt.py <url>` 直跑：
+# 字幕優先 → 無字幕退 yt-dlp 下載音軌（ffmpeg 壓 16kHz mono opus，
+# 解除 Groq 25MB 上限的長片限制）→ Groq Whisper 轉錄。
+#
+# Base = compose 原本釘的 openab 預設 image digest（含 openab + kiro-cli）。
+# Build: docker compose ... build openab-kiro
+FROM ghcr.io/openabdev/openab@sha256:de5b134815c55893f3612b7421b4768464a602af4862360081ba42b57e4eebc7
+
+USER root
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends python3 python3-pip ffmpeg \
+ && rm -rf /var/lib/apt/lists/* \
+ && pip3 install --no-cache-dir --break-system-packages \
+      yt-dlp youtube-transcript-api requests
+USER agent

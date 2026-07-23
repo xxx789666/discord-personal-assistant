@@ -1,0 +1,50 @@
+# OpenAB config — Claude Code bridge (#travel-planner，行程彙整)
+#
+# Schema 與 key facts 完全沿用 config-claude.toml（2026-05-15 對上游驗證）。
+# 與 quant 版的差異只有：token 變數、頻道、working_dir、無 QuantDinger MCP。
+# 同樣的硬規則：NEVER set ANTHROPIC_API_KEY — Claude Code 會優先用它而非
+# host OAuth（Max 訂閱），帳單會默默跑到 API 去（CLAUDE.md landmine #1）。
+
+[discord]
+bot_token = "${DISCORD_TOKEN_TRAVEL_CLAUDE}"
+# #travel-planner — 與 config-travel-nvidia.toml 填同一個頻道 ID。
+# （2026-06-12：研究搭檔由 Gemini 換成 NVIDIA bridge，原因見該檔頭部。）
+allowed_channels = [
+  "1514819240631206072",  # #travel-planner（AA-agent 伺服器，2026-06-12 API 建立）
+]
+# 私訊免 @ ＋ 使用者白名單 — 說明見 config-kiro.toml 同段。
+allow_dm = true
+allowed_users = [
+  "843428445802725388",   # anxxxiii（owner）
+  "1488170559865884684",  # qmini20
+]
+# ── 雙 bot 協作（可選，先停用）────────────────────────────────────────────
+# 對稱設定：讓 NVIDIA bot 能 @mention 這個 Claude bot 接力彙整。啟用方式
+# 見 config-travel-nvidia.toml 同段落說明。
+# allow_bot_messages = "mentions"
+# trusted_bot_ids = ["REPLACE_WITH_NVIDIA_BOT_ID"]
+
+[agent]
+command = "claude-agent-acp"
+args = []
+# TravelMemory vault（docker-compose.yml 掛載）。AGENTS.md / CLAUDE.md 在
+# vault 根目錄定義角色：這隻 bot 負責讀 Sources/ 與 research_notes.md，
+# 產出 Trips/<slug>/itinerary.md。
+working_dir = "/workspace/TravelMemory"
+# 不需要任何 MCP / API 變數 — inherit_env 留空（預設只繼承 HOME, PATH, USER）。
+
+[pool]
+max_sessions = 1
+session_ttl_hours = 2
+
+[reactions]
+enabled = true
+remove_after_reply = false
+
+# 語音訊息轉文字 — 同 config-claude.toml（說明見 config-travel-gemini.toml）。
+[stt]
+enabled = true
+api_key = "${GROQ_API_KEY}"
+model = "whisper-large-v3-turbo"
+base_url = "https://api.groq.com/openai/v1"
+echo_transcript = true

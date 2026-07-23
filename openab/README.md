@@ -1,0 +1,121 @@
+# openab — Discord 個人助理 stack 總覽
+
+> 最後更新：2026-06-20（新增 #不動產估價 估價 bot）。本資料夾是整套系統的
+> 部署中心；compose 專案名 `discord-assistant`，與 D:\AIQuant 的 quant stack 完全分離。
+
+## 一鍵維運
+
+```powershell
+# 全部啟動 / 停止 / 看狀態
+docker compose -f "D:\discord 個人助理\openab\docker-compose.yml" up -d
+docker compose -f "D:\discord 個人助理\openab\docker-compose.yml" stop
+docker ps --filter "label=com.docker.compose.project=discord-assistant"
+
+# 看某隻 bot 的 log
+docker logs openab-kiro --tail 30
+```
+
+## 服務一覽（9 個）
+
+| 服務 | 角色 | 頻道/端口 | 詳細文件 |
+|---|---|---|---|
+| openab-kiro | Kiro CLI 通用助理＋旅遊查證主力＋YouTube 轉錄 | #kiro-assistant | KIRO_SETUP.md |
+| openab-nvidia-lab | qwen-code → NVIDIA NIM 免費模型（實驗） | #nvidia-lab | NVIDIA_SETUP.md |
+| openab-travel-nvidia | 同上殼（旅遊查證副手） | #travel-planner | NVIDIA_SETUP.md |
+| openab-travel-claude | Claude Code 行程彙整（獨立 Pro 帳號） | #travel-planner | TRAVEL_SETUP.md |
+| openab-estate | 同 nvidia 殼（實價登錄比價估價；標示部使用者人工貼） | #不動產估價 | ESTATE_SETUP.md |
+| steel-api / steel-ui | 瀏覽器沙箱（讀網頁/截圖/登入態）＋live viewer | 127.0.0.1:3000/9223、5173 | STEEL_SETUP.md |
+| searxng | 搜尋 JSON API（自架 metasearch） | 127.0.0.1:8081 | STEEL_SETUP.md §5.5 |
+| pdf-publisher | 行程變動自動轉 PDF 發 Discord | （無端口） | 本檔 §pdf-publisher |
+
+## Discord 配置（伺服器「AA-agent」 1514818023737790614）
+
+| 頻道 | ID | 服務的 bot |
+|---|---|---|
+| #kiro-assistant | 1514819246838780095 | kiro-bridge |
+| #nvidia-lab | 1514819234448933117 | Nvidia-bridge |
+| #travel-planner | 1514819240631206072 | Nvidia-bridge（查證）+ travel-claudebridge（彙整） |
+| #不動產估價 | 1517804694901362752 | Nvidia-bridge（openab-estate 容器，2026-06-20 建）|
+| #一般 | 1514818024467726471 | （無 bot 服務） |
+
+- **觸發規則**：頻道主訊息要 @（上游硬限制）；討論串內免 @；
+  **私訊全部免 @**（四隻 bot 都 `allow_dm = true`）
+- **使用者白名單**（五份 config 的 `allowed_users`，僅此二人可用 bot）：
+  - `843428445802725388` anxxxiii（owner）
+  - `1488170559865884684` qmini20
+- 新增成員：把 user ID 加進五份 config → `up -d --force-recreate` 各 bot 容器
+
+## 機密（../.local/，gitignore）
+
+| 檔案 | 內容 |
+|---|---|
+| discord_token.env | DISCORD_TOKEN_NVIDIA / _TRAVEL_CLAUDE / _KIRO |
+| nvidia.env | NVIDIA_API_KEY（build.nvidia.com 免費）|
+| groq.env | GROQ_API_KEY（語音 STT + yt.py Whisper 退路）|
+
+## 帳號 / 額度來源（互不干擾）
+
+| 後端 | 帳號 | 認證存放 |
+|---|---|---|
+| Kiro CLI | AWS Builder ID | volume `aiquant_kiro_auth`（device-flow 登入）|
+| NVIDIA NIM | nvapi key | env（nvidia.env）|
+| Claude Code | **X011training@gmail.com（Pro，獨立帳號）** | volume `assistant_travelclaude_state`（容器內 /login）|
+
+⚠ 硬規則：**任何容器都不准設 ANTHROPIC_API_KEY**（Claude Code 會棄 OAuth 改走 API 計費）。
+
+## 跨頻道工作流（旅遊）
+
+```
+DM kiro-bridge「查 XXX」──自動──▶ TravelMemory/Trips/<slug>/research_notes.md
+DM travel-claudebridge「排行程」─▶ Trips/<slug>/itinerary.md
+        └─ pdf-publisher（≤20 秒）─▶ itinerary.pdf 存回 vault ＋ 發到 #travel-planner 📄
+```
+
+Kiro 的「旅遊主題自動寫 vault」規則在 `KiroSpace/AGENTS.md` ＋
+`KiroSpace/.kiro/steering/travel/research-output.md`（雙保險）。
+
+## pdf-publisher
+
+確定性監看（不依賴 LLM 記得）：輪詢 vault `Trips/*/itinerary.md`（20 秒），
+變動 → md→HTML →（容器內部 HTTP 給 Steel 抓，Steel 不收 data: URL）→
+`/v1/pdf` 真 Chrome 渲染（CJK 字型已驗證）→ PDF 存回 trip 資料夾 ＋
+以 travel-claudebridge 身分發到 #travel-planner。已發佈 hash 存
+`assistant_pdfpub_state` volume，重啟不重發。程式：`pdf-publisher/publish.py`。
+
+## 工作區工具（agent 用）
+
+| 工具 | 用途 | kiro（python3 直跑） | nvidia（uv run） |
+|---|---|---|---|
+| tools/web.py | SearXNG 搜尋 / Steel scrape（8000 字截斷）/ 截圖 / PDF / 登入 session | （kiro 用 curl 版技能，見其 SKILL.md） | ✅ |
+| tools/yt.py | YouTube → 逐字稿（字幕優先 → yt-dlp+Groq Whisper） | ✅ 含 ffmpeg 壓縮（長片 OK） | ✅（無 ffmpeg，限 24MB） |
+
+副本位置：LabSpace/tools、TravelMemory/tools、KiroSpace/tools（改一份要同步三份）。
+
+## 本資料夾檔案
+
+| 檔案 | 用途 |
+|---|---|
+| docker-compose.yml | stack 定義（服務、volume、port — 唯一真相來源）|
+| config-*.toml ×5 | 各 bot 的 OpenAB 設定（頻道、agent 指令、env、白名單）|
+| Dockerfile.kiro | kiro 衍生 image（+python3/ffmpeg/yt-dlp）|
+| Dockerfile.nvidia | nvidia 衍生 image（+qwen-code）|
+| qwen-output-language.md | qwen 強制繁中範本（灌進 qwen volumes 用）|
+| searxng-settings.yml | SearXNG 設定（formats 加了 json）|
+| pdf-publisher/ | 自動 PDF 服務（Dockerfile + publish.py）|
+| *_SETUP.md ×5 | 各子系統的現況、重建步驟、踩坑紀錄（含 ESTATE_SETUP.md）|
+
+## Named volumes（全部 external — `down -v` 不會清，但勿手動 prune）
+
+| volume | 內容 | 丟了會怎樣 |
+|---|---|---|
+| aiquant_kiro_auth | AWS Builder ID 憑證 | 重跑 device-flow 登入（KIRO_SETUP §3）|
+| aiquant_kiro_state | Kiro 設定/session | 無痛 |
+| assistant_travelclaude_state | Pro 帳號 OAuth | 容器內重跑 /login |
+| aiquant_*_qwen_state ×2 + assistant_estate_qwen_state | qwen 設定＋**強制繁中檔** | 重 chown 1000 + 重灌 output-language（NVIDIA_SETUP §4/§7、ESTATE_SETUP）|
+| aiquant_steel_cache | Steel Chrome cookies（登入態）| 各網站重登 |
+| assistant_pdfpub_state | 已發佈 PDF 的 hash | 會把現有行程重發一次（無害）|
+
+## 與 AIQuant 僅剩的依賴
+
+base image `openab-codex:with-uv`（Dockerfile.nvidia 的 FROM；quant 那邊
+build 的）。若被刪：到 D:\AIQuant\openab 用 Dockerfile.codex.ext 重建。

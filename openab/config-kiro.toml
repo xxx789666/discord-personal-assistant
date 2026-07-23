@@ -1,0 +1,59 @@
+# OpenAB config — Kiro CLI bridge (#kiro-assistant，通用助理)
+#
+# Schema 沿用 config-claude.toml（2026-05-15 對上游驗證的 key facts）。
+# Kiro 專屬部分對照 docs/kiro.md（2026-06-13 抓取）：
+#   - Kiro CLI 原生 ACP：預設 OPENAB_AGENT_COMMAND="kiro-cli acp --trust-all-tools"，
+#     這裡顯式寫出以求確定性。
+#   - 認證：一次性 device-flow 登入（AWS Builder ID），token 落在
+#     ~/.local/share/kiro-cli/data.sqlite3 — 已用 named volume 持久化
+#     （KIRO_SETUP.md §3）。
+#   - Session 啟動自動讀 working_dir 的 AGENTS.md / README.md 與
+#     .kiro/steering/**/*.md（長期記憶放這）。
+#   - 映像（ghcr.io/openabdev/openab，2026-06-13 inspect 確認）：
+#     user=agent, HOME=/home/agent。
+
+[discord]
+bot_token = "${DISCORD_TOKEN_KIRO}"
+# #kiro-assistant — 建好頻道後把真實 ID 填進來（KIRO_SETUP.md §2）。
+allowed_channels = [
+  "1514819246838780095",  # #kiro-assistant（AA-agent 伺服器，2026-06-12 API 建立）
+]
+# 私訊免 @（2026-06-12）：DM 一律直接處理，不需要 mention。
+allow_dm = true
+# 使用者白名單（2026-06-12 qmini20 加入後啟用）：設了此清單後
+# allow_all_users 自動關閉 — 只有名單上的人能用 bot（含 DM）。
+# 新增成員：補 ID 進來＋重建容器。額度（AWS/NVIDIA/Pro）由名單共享。
+allowed_users = [
+  "843428445802725388",   # anxxxiii（owner）
+  "1488170559865884684",  # qmini20
+]
+
+[agent]
+command = "kiro-cli"
+args = ["acp", "--trust-all-tools"]
+# GROQ_API_KEY 注入 agent 子行程（2026-06-12）— KiroSpace/tools/yt.py 的
+# YouTube 無字幕 STT 退路用（Whisper API）。同一把 key 也被 OpenAB [stt]
+# 用於 Discord 語音訊息。
+env = { GROQ_API_KEY = "${GROQ_API_KEY}" }
+# KiroSpace 是唯一掛載的工作區（docker-compose.yml）。AGENTS.md 在根目錄
+# 定義角色；長期記憶寫 .kiro/steering/。
+working_dir = "/workspace/KiroSpace"
+
+[pool]
+# 與其他 bridges 同樣保守：一次一個 session。
+max_sessions = 1
+session_ttl_hours = 2
+
+[reactions]
+enabled = true
+remove_after_reply = false
+
+# 語音訊息轉文字 — 同 config-claude.toml 的 Groq whisper 設定。
+# GROQ_API_KEY 來自 ../.local/agent_token.env（QUANTDINGER_* 不會進
+# agent 子行程 — 無 inherit_env）。
+[stt]
+enabled = true
+api_key = "${GROQ_API_KEY}"
+model = "whisper-large-v3-turbo"
+base_url = "https://api.groq.com/openai/v1"
+echo_transcript = true

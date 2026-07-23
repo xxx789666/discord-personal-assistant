@@ -1,0 +1,12 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(uv *)",
+      "WebFetch(www.klook.com)",
+      "WebFetch(www.visitbusan.net)",
+      "WebFetch(visitbusanpass.com)",
+      "WebFetch(en.wikipedia.org)"
+    ]
+  },
+  "$version": 4
+}
