@@ -216,6 +216,19 @@ INCOME_LABEL2KEY = {
     "利息支出": "interest_exp", "其他支出": "other_exp",
     "稅前淨利": "pretax", "所得稅": "tax", "稅後淨利": "aftertax",
 }
+INCOME_ROWS = [
+    ("銷貨淨額", "sales_net"),
+    ("－銷貨成本", "cogs"),
+    ("銷貨毛利", "gross"),
+    ("－營業費用", "opex"),
+    ("營業淨利", "op_income"),
+    ("其他收入", "other_income"),
+    ("－利息支出", "interest_exp"),
+    ("－其他支出", "other_exp"),
+    ("稅前淨利", "pretax"),
+    ("－所得稅", "tax"),
+    ("稅後淨利", "aftertax"),
+]
 
 
 def _compute_income_year(y):
@@ -259,7 +272,7 @@ def _find_table_by_header(doc, first_cell_text):
     return None
 
 
-def _set_cell_keepfont(cell, text):
+def _set_cell_keepfont(cell, text, size_pt=None):
     """寫入儲存格並沿用模板原字型（清空後的空 run 保有原格式）。"""
     p = cell.paragraphs[0]
     if p.runs:
@@ -268,6 +281,22 @@ def _set_cell_keepfont(cell, text):
             r.text = ""
     else:
         _fill_cell(cell, text, 11)
+    if size_pt is not None:
+        for r in p.runs:
+            _set_run_font(r, size_pt)
+
+
+def _compact_numeric_font(text, default_pt):
+    """Return a smaller font for long numeric cells in dense financial tables."""
+    s = str(text)
+    if not s:
+        return default_pt
+    chars = len(s.replace("-", "").replace(".", "").replace("%", ""))
+    if chars >= 7:
+        return min(default_pt, 7)
+    if chars >= 6:
+        return min(default_pt, 8)
+    return default_pt
 
 
 def _fill_income(doc, section):
@@ -308,7 +337,76 @@ def _fill_income(doc, section):
             _set_cell_keepfont(tb.rows[ri].cells[vcol], f"{v:,}" if isinstance(v, int) else "")
             pct = (v / base * 100) if (isinstance(v, int) and base) else 0.0
             _set_cell_keepfont(tb.rows[ri].cells[pcol], f"{pct:.2f}")
+    ref = tb._tbl
+    for g in section.get("guarantors") or []:
+        years = (g.get("years") or [])[:5]
+        if not years:
+            continue
+        if len(g.get("years") or []) > 5:
+            review.append(
+                f"肆一損益（{g.get('name','保證公司')}）：{len(g.get('years') or [])} 年超過 5 年欄位上限，僅填最近 5 年")
+        created, gtb = _build_guarantor_income_table(doc, g.get("name", ""), years)
+        _fill_guarantor_income_columns(gtb, years)
+        for el in created:
+            ref.addnext(el)
+            ref = el
     return review
+
+
+def _build_guarantor_income_table(doc, name, years):
+    n = min(len(years), 5)
+    ncols = 1 + 2 * n
+    font_pt = 8 if n >= 5 else 10
+    created = []
+
+    hp = doc.add_paragraph()
+    hp.paragraph_format.space_before = Pt(8)
+    hr = hp.add_run(f"◎保證公司-{name} 損益表")
+    _set_run_font(hr, 12, bold=True)
+    created.append(hp._p)
+
+    table = doc.add_table(rows=1 + len(INCOME_ROWS), cols=ncols)
+    table.style = "Table Grid"
+    table.autofit = False
+    table.alignment = 1
+    _mark_header_row(table.rows[0])
+    _fill_cell(table.rows[0].cells[0], INCOME_ANCHOR_CELL, font_pt, bold=True)
+    for yi in range(n):
+        _fill_cell(table.rows[0].cells[1 + 2 * yi], "", font_pt, bold=True)
+        _fill_cell(table.rows[0].cells[2 + 2 * yi], "%", font_pt, bold=True)
+    for ri, (label, _key) in enumerate(INCOME_ROWS, start=1):
+        _fill_cell(table.rows[ri].cells[0], label, font_pt, align=WD_ALIGN_PARAGRAPH.LEFT)
+    label_w = 38
+    col_w = (180 - label_w) / (ncols - 1)
+    for r in table.rows:
+        for i, c in enumerate(r.cells):
+            c.width = Mm(label_w if i == 0 else col_w)
+    created.append(table._tbl)
+    return created, table
+
+
+def _income_direct_display(y):
+    values = y.get("values")
+    if isinstance(values, dict):
+        return values
+    return _compute_income_year(y)
+
+
+def _fill_guarantor_income_columns(tb, years):
+    font_pt = 8 if len(years) >= 5 else 10
+    for yi, y in enumerate(years):
+        vcol, pcol = 1 + 2 * yi, 2 + 2 * yi
+        _fill_cell(tb.rows[0].cells[vcol], y.get("label", ""), font_pt, bold=True)
+        disp = _income_direct_display(y)
+        base = disp.get("sales_net") or 0
+        for ri, (_label, key) in enumerate(INCOME_ROWS, start=1):
+            v = disp.get(key)
+            v_text = f"{v:,}" if isinstance(v, int) else ""
+            _fill_cell(tb.rows[ri].cells[vcol], v_text, _compact_numeric_font(v_text, font_pt))
+            _set_no_wrap(tb.rows[ri].cells[vcol])
+            pct = (v / base * 100) if (isinstance(v, int) and base) else 0.0
+            _fill_cell(tb.rows[ri].cells[pcol], f"{pct:.2f}", font_pt)
+            _set_no_wrap(tb.rows[ri].cells[pcol])
 
 
 # ── 肆二 401 表（申戶／關企）───────────────────────────────
@@ -369,7 +467,10 @@ def _fill_tax401_group(tb, years, review, label):
         ]
         for row, vals in row_vals:
             for ci, val in enumerate(vals):
-                _set_cell_keepfont(row.cells[ci], val)
+                size_pt = _compact_numeric_font(val, 9) if ci >= 2 else 9
+                _set_cell_keepfont(row.cells[ci], val, size_pt=size_pt)
+                if ci >= 1:
+                    _set_no_wrap(row.cells[ci])
             if y.get("needs_review"):
                 for c in row.cells:
                     _shade(c, REVIEW_YELLOW)
@@ -441,9 +542,23 @@ def _bs_fill_columns(tb, years, review, label, font_pt=None):
                 f"肆三資負（{label}）{y.get('label','?')}：未知列標籤 {unknown}，未填")
         for lbl, ri in row_of.items():
             v = values.get(lbl)
-            setter(tb.rows[ri].cells[vcol], f"{v:,}" if isinstance(v, int) else "")
+            v_text = f"{v:,}" if isinstance(v, int) else ""
+            if font_pt is None:
+                setter(tb.rows[ri].cells[vcol], v_text)
+            else:
+                _fill_cell(
+                    tb.rows[ri].cells[vcol],
+                    v_text,
+                    _compact_numeric_font(v_text, font_pt),
+                )
+                _set_no_wrap(tb.rows[ri].cells[vcol])
             if isinstance(v, int) and isinstance(base, int) and base:
-                setter(tb.rows[ri].cells[pcol], f"{v / base * 100:.2f}")
+                pct_text = f"{v / base * 100:.2f}"
+                if font_pt is None:
+                    setter(tb.rows[ri].cells[pcol], pct_text)
+                else:
+                    _fill_cell(tb.rows[ri].cells[pcol], pct_text, font_pt)
+                    _set_no_wrap(tb.rows[ri].cells[pcol])
             else:
                 setter(tb.rows[ri].cells[pcol], "")
         debt, equity = values.get("負債總額"), values.get("淨值總額")
@@ -461,7 +576,7 @@ def _build_guarantor_bs_table(doc, applicant_tb, name, years):
               for ri in range(1, len(applicant_tb.rows))]
     n = min(len(years), 5)
     ncols = 1 + 2 * n
-    font_pt = 9 if n >= 5 else 10
+    font_pt = 8 if n >= 5 else 10
 
     created = []
     hp = doc.add_paragraph()
@@ -521,6 +636,7 @@ def _fill_balancesheet(doc, section):
 
 # ── 捌 保證人資力（基本欄）─────────────────────────────────
 GUARANTOR_HEADER = ["姓名", "出生年月日", "婚姻", "現職", "電話"]
+GUARANTOR_ESTATE_HEADER = ["土地座落地段/建物地址", "地號", "建號", "地坪持分", "建坪持分", "設定情形"]
 
 
 def _find_guarantor_tables(doc):
@@ -532,15 +648,92 @@ def _find_guarantor_tables(doc):
     return out
 
 
+def _build_guarantor_block(doc, index):
+    """Build an extra guarantor basic-info block for templates with too few slots."""
+    created = []
+
+    p = doc.add_paragraph()
+    p.paragraph_format.space_before = Pt(8)
+    r = p.add_run(f"({index})")
+    _set_run_font(r, 12, bold=True)
+    created.append(p._p)
+
+    tb = doc.add_table(rows=4, cols=5)
+    tb.style = "Table Grid"
+    tb.autofit = False
+    tb.alignment = 1
+    for ci, text in enumerate(GUARANTOR_HEADER):
+        _fill_cell(tb.rows[0].cells[ci], text, 10, bold=True)
+    for ci in range(5):
+        _fill_cell(tb.rows[1].cells[ci], "", 10)
+    _fill_cell(tb.rows[2].cells[0], "性別", 10, bold=True)
+    _fill_cell(tb.rows[2].cells[1], "身份證號", 10, bold=True)
+    addr_label = tb.rows[2].cells[2].merge(tb.rows[2].cells[4])
+    _fill_cell(addr_label, "通訊地址", 10, bold=True)
+    _fill_cell(tb.rows[3].cells[0], "", 10)
+    _fill_cell(tb.rows[3].cells[1], "", 10)
+    addr_value = tb.rows[3].cells[2].merge(tb.rows[3].cells[4])
+    _fill_cell(addr_value, "", 10)
+    for row in tb.rows:
+        for cell in row.cells:
+            cell.width = Mm(36)
+    created.append(tb._tbl)
+
+    ep = doc.add_paragraph()
+    ep.paragraph_format.space_before = Pt(8)
+    er = ep.add_run("名下不動產：")
+    _set_run_font(er, 12)
+    created.append(ep._p)
+
+    etb = doc.add_table(rows=2, cols=6)
+    etb.style = "Table Grid"
+    etb.autofit = False
+    etb.alignment = 1
+    for ci, text in enumerate(GUARANTOR_ESTATE_HEADER):
+        _fill_cell(etb.rows[0].cells[ci], text, 9, bold=True)
+    for ci in range(6):
+        _fill_cell(etb.rows[1].cells[ci], "", 9)
+    widths = [60, 20, 20, 24, 24, 32]
+    for row in etb.rows:
+        for ci, cell in enumerate(row.cells):
+            cell.width = Mm(widths[ci])
+    created.append(etb._tbl)
+
+    sp = doc.add_paragraph()
+    sr = sp.add_run("說明：")
+    _set_run_font(sr, 12)
+    created.append(sp._p)
+    return created, tb
+
+
+def _ensure_guarantor_tables(doc, count):
+    tables = _find_guarantor_tables(doc)
+    if len(tables) >= count:
+        return tables
+    anchor = _find_anchor(doc, "玖、")
+    ref = anchor if anchor is not None else doc.element.body[-1]
+    for idx in range(len(tables) + 1, count + 1):
+        created, tb = _build_guarantor_block(doc, idx)
+        if anchor is not None:
+            for el in created:
+                ref.addprevious(el)
+        else:
+            for el in created:
+                ref.addnext(el)
+                ref = el
+        tables.append(tb)
+    return tables
+
+
 def _fill_guarantor(doc, section):
     """填保證人基本欄（表 18/20…）。身分證可得欄自動填；現職/電話標 needs_review。
 
     排序規則：申戶負責人（principal=true）排第一位（（1）），其餘依原序穩定排列。
     """
     review = []
-    tables = _find_guarantor_tables(doc)
     guars = sorted(section.get("guarantors", []),
                    key=lambda g: 0 if g.get("principal") else 1)
+    tables = _ensure_guarantor_tables(doc, len(guars))
     if len(guars) > len(tables):
         review.append(
             f"捌保證人：{len(guars)} 位超過模板 {len(tables)} 個區塊，超出者未填")

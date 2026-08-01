@@ -403,12 +403,18 @@ def test_luduan_same_bank_rows_merged(built):
     assert tb.rows[1].cells[1]._tc is tb.rows[2].cells[1]._tc
 
 
-def test_guarantor_overflow_reported(tmp_path):
-    # 模板僅 2 個保證人區塊；給 3 位 → 第三位未填並回報
+def test_guarantor_blocks_auto_expand(tmp_path):
+    """模板僅 2 個保證人區塊；給 3 位 → 自動增建第 3 區塊並填入（agent 擴充行為）。"""
     section = {"guarantors": [
         {"name": f"測試{i}", "birth": "80.01.01", "gender": "男",
          "id_no": f"測試證號{i}", "address": "測試市", "married": "已婚"}
         for i in range(3)]}
     out = tmp_path / "r.docx"
     _, review = fill_report({"guarantor": section}, out)
-    assert any("超過模板" in r for r in review)
+    doc = Document(str(out))
+    gtabs = [t for t in doc.tables
+             if [c.text for c in t.rows[0].cells][:5]
+             == ["姓名", "出生年月日", "婚姻", "現職", "電話"]]
+    assert len(gtabs) >= 3                       # 第 3 區塊已增建
+    assert gtabs[2].rows[1].cells[0].text == "測試2"
+    assert not any("超過模板" in r for r in review)
