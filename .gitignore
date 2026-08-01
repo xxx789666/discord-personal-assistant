@@ -8,6 +8,7 @@
 # Local editor state
 .obsidian/workspace.json
 .obsidian/workspace-mobile.json
+.obsidian/graph.json
 
 # Python / Node generated files
 **/__pycache__/
