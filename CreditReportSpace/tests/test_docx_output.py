@@ -62,9 +62,9 @@ def test_role_repeated_on_every_data_row(built_doc):
 
 def test_bank_cells_merged_for_consecutive_same_bank(built_doc):
     t = built_doc.tables[0]
-    # 華銀/測試北 兩列 → 銀行儲存格合併
+    # 華南銀行/測試北 兩列 → 銀行儲存格合併
     assert t.rows[1].cells[1]._tc is t.rows[2].cells[1]._tc
-    assert t.rows[1].cells[1].text == "華銀/測試北"
+    assert t.rows[1].cells[1].text == "華南銀行/測試北"
 
 
 def test_negative_change_rendered_with_parens(built_doc):
@@ -99,7 +99,7 @@ def test_na_rendered_as_dash(built_doc):
     t = built_doc.tables[1]
     for row in t.rows:
         cells = [c.text for c in row.cells]
-        if any("土銀/測試五" in c for c in cells):
+        if any("土地銀行/測試五" in c for c in cells):
             assert "—" in cells
             break
     else:
@@ -120,7 +120,7 @@ def test_numeric_cells_have_no_wrap(built_doc):
 def test_notes_and_source(built_doc):
     texts = [p.text for p in built_doc.paragraphs]
     assert any("說明：" in t for t in texts)
-    assert any("申戶銀行往來四家" in t for t in texts)
+    assert any("主債餘額為 198,700 仟元。" in t for t in texts)
     assert any("資料來源：財團法人金融聯合徵信中心信用報告。" in t for t in texts)
 
 
