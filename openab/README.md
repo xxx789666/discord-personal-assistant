@@ -148,7 +148,33 @@ Python 3、python-docx、pytest/jsonschema，並鎖定 Poppler、LibreOffice
 | aiquant_steel_cache | Steel Chrome cookies（登入態）| 各網站重登 |
 | assistant_pdfpub_state | 已發佈 PDF 的 hash | 會把現有行程重發一次（無害）|
 
+## Image 與 openab 版本對照（查證於 2026-08-01）
+
+**七個 bot 不是同一個 openab 版本。** 遇到「為什麼這隻有這個功能、那隻沒有」
+先看這張表，不要假設一致。
+
+| 容器 | image | 基底 | openab 版本 | image 建置日 |
+|---|---|---|---|---|
+| openab-kiro | `openab-kiro:tools` | `ghcr.io/openabdev/openab@sha256:de5b1348…` | **0.8.4** | 2026-06-12 |
+| openab-nvidia-lab<br>openab-estate<br>openab-travel-nvidia | `openab-nvidia:qwen` | **`openab-codex:with-uv`** ⚠️ | < 0.8.4 | 2026-06-12 |
+| openab-travel-claude<br>openab-astruct | `ghcr.io/openabdev/openab-claude@sha256:3d2017ef…` | 官方 | < 0.8.4 | 2026-05-01 |
+| openab-credit-report | `assistant-credit-report-codex:dev` | **`openab-codex:with-uv@sha256:0677ae0f…`** ⚠️ | < 0.8.4 | 2026-08-01 |
+
+**怎麼判版本**：`docker exec <容器> openab --version`。只有較新的 build 認得
+`-V/--version`；回 `error: unexpected argument '--version' found` 就代表**比
+0.8.4 舊**（該旗標是後來才加的）。用 `openab --help` 的 Options 段落也看得出來。
+
+上游最新 release 是 `0.10.0-beta.2`，所以連最新的 kiro 都落後兩個 minor。
+目前不急著追：Discord gateway、ACP 轉發、pool、白名單、STT 在 0.8.x 都齊了，
+ACP over WebSocket 與 MCP facade 這些新東西一個都沒用到。真正的升級誘因是
+Gmail adapter（見 MAIL_CLEANUP_FRAMEWORK.md），而它還沒進任何 release——
+等它發布時再一次把版本拉齊，順便處理下面那個跨系統依賴。
+
 ## 與 AIQuant 僅剩的依賴
 
 base image `openab-codex:with-uv`（Dockerfile.nvidia 的 FROM；quant 那邊
 build 的）。若被刪：到 D:\AIQuant\openab 用 Dockerfile.codex.ext 重建。
+
+⚠️ **四個容器靠它活著**：三個 qwen 殼（nvidia-lab / estate / travel-nvidia）
+加 credit-report。這個 image 不在本 repo、沒有版本標籤管理、且屬於另一套系統
+——它比「版本落後上游」更值得留意，因為那是可控的，這個不是。
