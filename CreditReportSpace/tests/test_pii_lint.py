@@ -18,6 +18,8 @@ SPACE_ROOT = Path(__file__).resolve().parent.parent
 SCAN_PATTERNS = [
     "*.md",
     "*.txt",
+    "docs/**/*.md",
+    "docs/**/*.txt",
     "fixtures/**/*.json",
     "schema/**/*.json",
     "tests/**/*.py",
@@ -56,6 +58,17 @@ FORBIDDEN_HASHES = {
     "00c984b234b48cb891befc3d50e5f1affb2a9d6bf35fbd435cb8efad5f1a0a5a",
     "2e3761e12acd49b88f334cd3825bfd983a05a25e7b3963aae8eb515db74d1f3f",
     "b0e9f199c29c578378dd1a13fc780f7628f46198fd462c57373c28c793d612fc",
+    # 徵信報告產製器黃金案的真實 token（公司/保證人/統編/身分證後6碼）
+    "19f3097d731f82d8541bfe10118db113520e34b1aaedf5e8c1d238056c469e1e",
+    "8a4b23c877cb97caab95922570e2b88381790b564097d93647d89d98fcd09975",
+    "1f8fbd7668ff1017985cebe98be9dbbdcef34d69a37137e4f2e23ff2dc9e32e3",
+    "cd47a6a9882d61191f5f918ccdb6b86cb37ed8718fabf36ab0516e1966986c59",
+    "f87c7059f8c2bb34e8eb6395940e417d0d7722bced516adb7c2c305d357e96c3",
+    "b1b716e3d388bc80ed74e7b73b06209af3e33379b9361f97994d1987aec3746c",
+    "3061129a936519d7c400aa5ae856e83f4294c01bcf286c801a1648245fe20759",
+    "73505c77ec40a35a956a78f801224fdf948a62f8fd0ae1ccecf3adfb829d76cb",
+    "106e7704dc25b339e32922e1e2e87108549ec85371577094bfbfa118aadebf60",
+    "098d3784bf0ec098d4ec61d5a745cf328732870e11af1e90d160bc50fe1eff17",
 }
 
 

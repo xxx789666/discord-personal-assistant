@@ -2,3 +2,5 @@
 -r requirements.txt
 pytest==9.0.2
 jsonschema==4.26.0
+# intake 層（分類器）讀 PDF 依賴；純產製層不需要。測試 classifier/CLI 需之。
+pymupdf==1.27.2.2
