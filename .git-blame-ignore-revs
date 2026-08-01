@@ -1,0 +1,10 @@
+# 純格式化 commit —— blame 時略過，才不會把整檔的作者都指到這裡。
+#
+# GitHub 會自動套用本檔。本機 git 需要設定一次（每個 clone 各設一次）：
+#     git config blame.ignoreRevsFile .git-blame-ignore-revs
+#
+# 只放「不改變程式行為」的 commit：行尾轉換、重新縮排、格式化工具全檔套用。
+# 必須是完整 40 字元 SHA，簡寫會讓 git 直接報錯。
+
+# chore: normalize remaining CRLF files to LF
+52c11c55c1e526b6475ef150de3772389ca9f81f
