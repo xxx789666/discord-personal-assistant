@@ -21,7 +21,10 @@ allowed_users = [
 # Codex CLI does not implement `codex --acp`. The verified OpenAB Codex image
 # supplies @zed-industries/codex-acp, which drives the real Codex app-server.
 command = "/opt/credit-report/agent-entrypoint.sh"
-args = ["codex-acp"]
+# Codex runs inside a dedicated, capability-dropped container. Docker Desktop
+# blocks the nested user namespace required by bwrap, so use the container as
+# the sandbox boundary and avoid Discord-incompatible permission prompts.
+args = ["codex-acp", "-c", "model=\"gpt-5.5\"", "-c", "sandbox_mode=\"danger-full-access\"", "-c", "approval_policy=\"never\""]
 working_dir = "/workspace/CreditReportSpace"
 env = { CREDIT_REPORT_BROKER_SOCKET = "/run/credit-report/discord.sock", CREDIT_REPORT_CHANNEL_ID = "${CREDIT_REPORT_CHANNEL_ID}", CREDIT_REPORT_WORKSPACE = "/workspace/CreditReportSpace", CREDIT_REPORT_INTAKE_ROOT = "/workspace/CreditReportSpace/tmp/docs/intake", CREDIT_REPORT_MAX_ATTACHMENT_BYTES = "26214400", CREDIT_REPORT_MAX_TOTAL_BYTES = "104857600", CREDIT_REPORT_MAX_ATTACHMENTS = "20", CREDIT_REPORT_MAX_OUTPUT_BYTES = "26214400" }
 

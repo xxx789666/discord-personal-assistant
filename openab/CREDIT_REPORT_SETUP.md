@@ -35,7 +35,7 @@ Codex/helper client 只可呼叫 channel-locked Unix socket API。
 ## Codex / OpenAB 相容性結論（本機已驗證）
 
 不要設定 `command = "codex"` 搭配 `args = ["--acp"]`：本機 Codex CLI
-`0.145.0` 的 help 沒有 `--acp`，image 內 Codex CLI `0.128.0` 也沒有。
+`0.145.0` 的 help 沒有 `--acp`；專用 image 也鎖定 Codex CLI `0.145.0`。
 
 實際採用 `openab-codex:with-uv`，本機 image ID
 `sha256:0677ae0af7c0e8b805619129473b9a1e1d1562dae4bf460c29abc50343e2192c`。
@@ -43,10 +43,14 @@ Codex/helper client 只可呼叫 channel-locked Unix socket API。
 
 - `openab` binary 存在，預設 entrypoint 是
   `openab run -c /etc/openab/config.toml`。
-- `codex-acp` 存在，package 是 `@zed-industries/codex-acp 0.11.1`。
-- image 內 Codex CLI 是 `0.128.0`；既有唯讀測試 volume 的
+- `codex-acp` 存在，package 鎖定為 `@zed-industries/codex-acp 0.16.0`。
+- image 內 Codex CLI 鎖定為 `0.145.0`；既有唯讀測試 volume 的
   `codex login status` 回報 `Logged in using ChatGPT`，證明此 image 的
   Codex/ChatGPT OAuth 路徑可用。新服務仍使用自己的 state volume，不共用憑證。
+- Docker Desktop 容器不允許 `bwrap` 建立 nested user namespace；ACP 因此固定
+  使用 `sandbox_mode="danger-full-access"` 與 `approval_policy="never"`。這裡的
+  full access 只在專用容器內：wrapper 仍降為 UID 1000、移除所有 capabilities
+  與 Discord token，附件與上傳仍只能經 channel-locked broker。
 - OpenAB upstream 也以 `command = "codex-acp"` 作為 Codex 正式接法：
   <https://github.com/openabdev/openab/blob/main/Dockerfile.codex>
 - 衍生 image 以版本鎖定的 Debian 套件安裝 Python 3.11、Poppler 22.12、
@@ -59,10 +63,9 @@ Codex/helper client 只可呼叫 channel-locked Unix socket API。
   `bash -lc` 與 `sh -lc` 驗證 interpreter 及上述三個 Python 套件，避免
   login shell 重設 PATH 後誤用系統 Python。
 
-不硬編模型名稱；`codex-acp` 使用該專用 Codex state 的 account/default model。
-這避免 image 內較舊 CLI 被指定到它不認得的未來模型。要固定模型時，先在隔離
-容器確認該 CLI/account 可見，再把 `-c model="..."` 加入
-`config-credit-report.toml` 的 `args`。
+`codex-acp` 固定使用已由專用 ChatGPT/Codex OAuth 帳號驗證可用的
+`gpt-5.5`。若未來模型供應異動，先在部署容器確認該 CLI/account 可見，再更新
+`config-credit-report.toml` 的 `args` 內 `-c model="..."`。
 
 ### 為何另加附件 helper
 
@@ -166,6 +169,8 @@ token 暴露給 Codex CLI。
 
 1. 白名單使用者在 `#聯徵報告製作` 主頻道 @bot，附 PDF/圖片並描述需求。
 2. OpenAB 建 thread、啟動一個 Codex ACP session，加入 `sender_context`。
+   若 OpenAB 未帶 `message_id`，使用者確認後的 `thread_id` 等於 starter
+   message ID；helper 以 parent `channel_id` + 該 `thread_id` 回抓原始附件。
 3. parent AGENTS 強制先執行：
 
    ```sh
