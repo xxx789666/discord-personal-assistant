@@ -105,13 +105,28 @@ def load_sections(sections_dir):
 
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    ap.add_argument("case_folder", help="徵信案件資料夾")
-    ap.add_argument("--sections", help="段落 JSON 目錄（luduan/income/guarantor.json）")
+    ap.add_argument("case_folder", nargs="?", help="徵信案件資料夾（一次性模式）")
+    ap.add_argument("--case", help="案件目錄（含 intake/ 與 sections/）；逐次累積模式，"
+                                   "自動推導路徑，供 Discord 手機端每次收檔重填")
+    ap.add_argument("--sections", help="段落 JSON 目錄（一次性模式）")
     ap.add_argument("-o", "--output", help="輸出 DOCX 路徑")
     ap.add_argument("--template", help="空白模板路徑（預設 templates/credit_report_blank.docx）")
     args = ap.parse_args(argv)
 
-    folder = Path(args.case_folder)
+    incremental = bool(args.case)
+    if incremental:
+        case = Path(args.case)
+        folder = case / "intake"
+        sections_dir = case / "sections"
+        default_out = case / f"{case.name}_徵信報告.docx"
+    elif args.case_folder:
+        folder = Path(args.case_folder)
+        sections_dir = Path(args.sections) if args.sections else None
+        default_out = SPACE_ROOT / "output" / "doc" / f"{folder.name}_徵信報告.docx"
+    else:
+        print("[錯誤] 需提供 案件資料夾 或 --case 目錄", file=sys.stderr)
+        return 2
+
     if not folder.is_dir():
         print(f"[錯誤] 找不到資料夾：{folder}", file=sys.stderr)
         return 2
@@ -126,17 +141,19 @@ def main(argv=None) -> int:
         for it in unknowns:
             print(f"    - {it['name']}")
 
-    if not args.sections:
+    if sections_dir is None:
         print("\n[結果] 只清點（未給 --sections，不產檔）")
         return 0
 
-    sections = load_sections(args.sections)
+    sections = load_sections(sections_dir)
     if not sections:
-        print(f"[錯誤] --sections {args.sections} 內沒有可用段落 JSON", file=sys.stderr)
+        if incremental:
+            print("\n[結果] 尚無段落資料（sections/ 空），本次只清點")
+            return 0
+        print(f"[錯誤] --sections {sections_dir} 內沒有可用段落 JSON", file=sys.stderr)
         return 2
 
-    out = Path(args.output) if args.output else (
-        SPACE_ROOT / "output" / "doc" / f"{folder.name}_徵信報告.docx")
+    out = Path(args.output) if args.output else default_out
     out.parent.mkdir(parents=True, exist_ok=True)
     _, review = fill_report(sections, out, template=args.template)
 

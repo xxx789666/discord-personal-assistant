@@ -96,6 +96,35 @@ def test_load_sections_maps_filenames(sections_dir):
     assert sections["luduan"]["entities"][0]["name"] == "測試甲（虛構）"
 
 
+def test_case_mode_incremental_fill(tmp_path, make_image, capsys):
+    """--case 逐次累積模式：intake/＋sections/ 自動推導、輸出到案件目錄。"""
+    case = tmp_path / "thread123"
+    (case / "intake").mkdir(parents=True)
+    (case / "sections").mkdir()
+    make_image(case / "intake" / "測試甲-身分證正面.jpg")
+    (case / "sections" / "guarantor.json").write_text(
+        json.dumps(GUARANTOR, ensure_ascii=False), encoding="utf-8")
+    rc = G.main(["--case", str(case)])
+    assert rc == 0
+    out = case / "thread123_徵信報告.docx"
+    assert out.is_file()
+    assert "已產生" in capsys.readouterr().out
+
+
+def test_case_mode_empty_sections_inventory_only(tmp_path, make_image, capsys):
+    """首次收檔：sections/ 尚空 → 只清點、不報錯。"""
+    case = tmp_path / "t2"
+    (case / "intake").mkdir(parents=True)
+    make_image(case / "intake" / "測試甲-身分證正面.jpg")
+    rc = G.main(["--case", str(case)])
+    assert rc == 0
+    assert "只清點" in capsys.readouterr().out
+
+
+def test_no_folder_no_case_returns_2(capsys):
+    assert G.main([]) == 2
+
+
 def test_unknown_file_warned(tmp_path, make_pdf, capsys):
     root = tmp_path / "case"
     root.mkdir()
