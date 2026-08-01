@@ -3,59 +3,40 @@
 獨立的個人助理系統（2026-06-12 自 AIQuant 完全分離）。
 用 Obsidian 開啟本資料夾即為 vault；bot 產出的所有筆記都在這裡面。
 
+> **系統、服務、頻道、維運指令 → [openab/README.md](openab/README.md)**
+> 那份是 stack 的唯一真相來源（11 個 services、頻道對照、機密位置、volumes）。
+> 本頁只回答一件事：**筆記在哪。**
+
 ## 📂 內容地圖
 
-### 旅遊（#travel-planner 頻道的資料）
-- [TravelMemory/Trips/](TravelMemory/Trips/README.md) — **行程與查證筆記**（bot 產出）
-  - 每個行程一個資料夾：`itinerary.md`（行程主檔）、`research_notes.md`（查證紀錄）、`budget.md`
-- [TravelMemory/Sources/](TravelMemory/Sources/README.md) — 你餵給 bot 的旅遊資料（攻略、訂位確認、逐字稿）
-- [TravelMemory/AGENTS.md](TravelMemory/AGENTS.md) — 旅遊 bot 的角色與規則
+### 旅遊 — `TravelMemory/`　#travel-planner
+- [Trips/](TravelMemory/Trips/README.md) — 行程與查證筆記（bot 產出）
+  每個行程一資料夾：`itinerary.md`（主檔，變動自動轉 PDF）、`research_notes.md`、`budget.md`
+- [Sources/](TravelMemory/Sources/README.md) — 你餵給 bot 的資料（攻略、訂位確認、逐字稿）
+- [AGENTS.md](TravelMemory/AGENTS.md) — 旅遊 bot 的角色與規則
 
-### 助理筆記
-- [KiroSpace/Notes/](KiroSpace/AGENTS.md) — Kiro（#kiro-assistant）的研究筆記
-- [LabSpace/Notes/](LabSpace/AGENTS.md) — NVIDIA 實驗頻道（#nvidia-lab）的產出
+### Kiro 助理 — `KiroSpace/`　#kiro-assistant
+- [AGENTS.md](KiroSpace/AGENTS.md) — 角色與可寫路徑規則
+- `Notes/`、`Output/` — 長篇成果落地處（**bot 首次寫入時才建立**）
+- 旅遊查證成果不寫這裡，一律寫進 `TravelMemory/Trips/<slug>/research_notes.md`
 
-### 聯徵報告（#聯徵報告製作）
-- `CreditReportSpace/` — PDF/圖片 intake、報告 agent 流程與 DOCX 成果
-- [CREDIT_REPORT_SETUP.md](openab/CREDIT_REPORT_SETUP.md) — Discord/Codex 整合、bootstrap、附件與 DOCX 回傳
+### NVIDIA 實驗 — `LabSpace/`　#nvidia-lab
+- [AGENTS.md](LabSpace/AGENTS.md) — 角色規則
+- [WebAccess.md](LabSpace/WebAccess.md) — 上網 + YouTube 逐字稿 cookbook
+- `Notes/`、`Output/` — 同上，首次寫入時建立
 
-### 系統文件（openab/）
-- [README.md](openab/README.md) — **stack 總覽**（服務表、頻道map、白名單、volumes、維運指令）
-- [KIRO_SETUP.md](openab/KIRO_SETUP.md) — Kiro 助理（含直驅模式、AWS 重登）
-- [NVIDIA_SETUP.md](openab/NVIDIA_SETUP.md) — NVIDIA bridge（含七條踩坑紀錄）
-- [TRAVEL_SETUP.md](openab/TRAVEL_SETUP.md) — 旅遊系統（工作流、Claude 帳號管理）
-- [STEEL_SETUP.md](openab/STEEL_SETUP.md) — Steel + SearXNG（上網基礎設施）
-- [CREDIT_REPORT_SETUP.md](openab/CREDIT_REPORT_SETUP.md) — 聯徵報告 Codex/OpenAB 服務
+### 不動產估價 — `EstateSpace/`　#不動產估價
+- [AGENTS.md](EstateSpace/AGENTS.md) — 角色規則（標示部禁自動化，由使用者人工貼）
+- [Output/](EstateSpace/Output/README.md) — 估價報告與成交比價產出
 
-## 🤖 頻道速查
+### 夜盤閘門法 — `AStructSpace/`　#a-struct
+- [AGENTS.md](AStructSpace/AGENTS.md) — 審核規則
+- `forward/` — 轉發區
 
-| 頻道              | Bot                 | 用途              | 成果落地                                                    |
-| --------------- | ------------------- | --------------- | ------------------------------------------------------- |
-| #kiro-assistant | kiro-bridge         | 通用問答＋**旅遊查證主力** | KiroSpace/Notes/、TravelMemory/Trips/*/research_notes.md |
-| #travel-planner | travel-claudebridge | 行程彙整            | TravelMemory/Trips/*/itinerary.md                       |
-| #travel-planner | Nvidia-bridge       | 查證副手（免費額度）      | research_notes.md                                       |
-| #nvidia-lab     | Nvidia-bridge       | 實驗、YouTube 逐字稿  | LabSpace/Notes/、Output/                                 |
-| #聯徵報告製作   | 專用 Codex bot（待 bootstrap） | PDF/圖片製作聯徵報告 | CreditReportSpace/、DOCX 回傳原 thread                  |
+### 聯徵報告 — `CreditReportSpace/`　#聯徵報告製作
+- [README.md](CreditReportSpace/README.md) — PDF/圖片 intake、報告流程、DOCX 產出
+- `聯徵報告範例/` — 人工整理的範例與流程說明（WORD 報告、製作流程）
 
-## ⚙️ 維運
+---
 
-```powershell
-# 啟動 / 停止整個 stack（不影響 AIQuant）
-docker compose -f "D:\discord 個人助理\openab\docker-compose.yml" up -d
-docker compose -f "D:\discord 個人助理\openab\docker-compose.yml" stop
-
-# 看某隻 bot 的 log
-docker logs openab-kiro --tail 30
-
-# 聯徵服務是 opt-in profile；完成 token/channel/auth bootstrap 後才啟動
-docker compose -f "D:\discord 個人助理\openab\docker-compose.yml" `
-  --profile credit-report up -d openab-credit-report
-```
-
-- 機密在 `.local/`（bot tokens、channel bootstrap、NVIDIA key、Groq key）— 不要進 git
-- Steel live viewer（登入態任務人工介入）：http://localhost:5173
-- SearXNG 搜尋介面（人工除錯）：http://localhost:8081
-- **行程自動 PDF**：`pdf-publisher` 服務監看 `Trips/*/itinerary.md`，
-  變動 ≤20 秒內自動轉 PDF 存回 trip 資料夾並發到 #travel-planner
-- 與 AIQuant 僅剩的依賴：base image `openab-codex:with-uv`
-- 既有助理可依各 config 使用私訊；聯徵 bot 基於敏感資料政策關閉 DM，只服務明確頻道
+機密在 `.local/`（bot tokens、channel bootstrap、API keys）— 不進 git。

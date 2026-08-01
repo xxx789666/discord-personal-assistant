@@ -3,6 +3,9 @@
 > 最後更新：2026-07-23（新增 #聯徵報告製作 Codex 服務，預設 profile 關閉）。
 > 本資料夾是整套系統的
 > 部署中心；compose 專案名 `discord-assistant`，與 D:\AIQuant 的 quant stack 完全分離。
+>
+> **本檔 = stack 的唯一真相來源**（服務、頻道、維運、機密、volumes）。
+> 找 bot 產出的筆記在哪 → [../INDEX.md](../INDEX.md)（Obsidian vault 首頁）。
 
 ## 一鍵維運
 
@@ -126,6 +129,7 @@ Python 3、python-docx、pytest/jsonschema，並鎖定 Poppler、LibreOffice
 | searxng-settings.yml | SearXNG 設定（formats 加了 json）|
 | pdf-publisher/ | 自動 PDF 服務（Dockerfile + publish.py）|
 | *_SETUP.md ×6 | 各子系統的現況、重建步驟、踩坑紀錄（含 CREDIT_REPORT_SETUP.md）|
+| MAIL_CLEANUP_FRAMEWORK.md | 信箱清理框架（**規劃中**）：三層分工，Layer 3 等 OpenAB 0.10.0-beta.3 |
 
 ## Named volumes（全部 external — `down -v` 不會清，但勿手動 prune）
 
