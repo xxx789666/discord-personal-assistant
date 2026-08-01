@@ -188,6 +188,165 @@ def test_balance_header_parsing():
     assert TF._luduan_balance_header("無日期") == "借款餘額"
 
 
+# ── 肆二 401 表 ──────────────────────────────────────────
+TAX401 = {
+    "applicant": {"years": [
+        # 部分年度（2 個月）：月平均=合計/2；進銷比=60/100
+        {"year": 2099, "sales": [100, None, None, None, None, None],
+         "purchases": [60, None, None, None, None, None]},
+        # 整年（6 槽）：月平均=1200/12=100；負值照填
+        {"year": 2098, "sales": [200, 200, 200, 200, 200, 200],
+         "purchases": [-30, 100, 100, 100, 100, 100]},
+    ]},
+    "affiliate": {"years": [
+        {"year": 2098, "sales": [500, None, None, None, None, None],
+         "purchases": [None] * 6, "needs_review": True},
+    ]},
+}
+
+
+def _tax401_tables(doc):
+    hdr = ["項目", "年度", "1-2", "3-4", "5-6", "7-8", "9-10", "11-12",
+           "合計", "月平均"]
+    return [t for t in doc.tables
+            if [c.text.strip() for c in t.rows[0].cells] == hdr]
+
+
+@pytest.fixture
+def built401(tmp_path):
+    out = tmp_path / "r401.docx"
+    _, review = fill_report({"tax401": TAX401}, out)
+    return Document(str(out)), review
+
+
+def test_tax401_partial_year_totals_and_ratio(built401):
+    doc, _ = built401
+    tb = _tax401_tables(doc)[0]          # 申戶
+    sales = [c.text for c in tb.rows[1].cells]
+    purch = [c.text for c in tb.rows[2].cells]
+    assert sales[0] == "銷貨" and sales[1] == "2099"
+    assert sales[8] == "100"             # 合計
+    assert sales[9] == "50"              # 月平均 = 100/2
+    assert purch[8] == "60"
+    assert purch[9] == "60.00%"          # 進銷比
+
+
+def test_tax401_full_year_average_and_negative(built401):
+    doc, _ = built401
+    tb = _tax401_tables(doc)[0]
+    sales = [c.text for c in tb.rows[3].cells]
+    purch = [c.text for c in tb.rows[4].cells]
+    assert sales[8] == "1,200"
+    assert sales[9] == "100"             # 1200/12
+    assert purch[2] == "-30"             # 負值照填
+    assert purch[8] == "470"
+    assert purch[9] == "39.17%"          # 470/1200
+
+
+def test_tax401_affiliate_needs_review_shaded(built401):
+    doc, review = built401
+    tb = _tax401_tables(doc)[1]          # 關企
+    row = tb.rows[1]
+    assert row.cells[0].text == "銷貨"
+    assert _cell_fill(row.cells[2]) == "FFF2CC"
+    assert any("關企" in r and "淡黃" in r for r in review)
+
+
+def test_tax401_rows_grow_beyond_template_capacity(tmp_path):
+    """模板申戶表預留 3 年；6 年資料應動態增列並全數填入。"""
+    years = [{"year": 2095 - i, "sales": [10 * (i + 1)] + [None] * 5,
+              "purchases": [None] * 6} for i in range(6)]
+    out = tmp_path / "r.docx"
+    _, review = fill_report({"tax401": {"applicant": {"years": years}}}, out)
+    doc = Document(str(out))
+    tb = _tax401_tables(doc)[0]
+    assert len(tb.rows) >= 13                       # 1 表頭 + 6 年 × 2 列
+    last_sales = tb.rows[11].cells                  # 第 6 年的銷貨列
+    assert last_sales[1].text == "2090"
+    assert last_sales[8].text == "60"
+    assert not any("超過模板" in r for r in review)
+
+
+# ── 肆三 資產負債表 ──────────────────────────────────────
+BS = {
+    "applicant": {"years": [
+        {"label": "2099 年", "values": {
+            "流動資產": 800, "現金": 100, "資產總額": 1000,
+            "負債總額": 600, "淨值總額": 400, "調整項目": -50}},
+    ]},
+    "guarantors": [{
+        "name": "測試開發（虛構）",
+        "years": [
+            {"label": f"{2098 - i} 年", "values": {
+                "資產總額": 1000 + i, "負債總額": 700,
+                "淨值總額": 300 + i, "現金": 10 * (i + 1)}}
+            for i in range(5)
+        ],
+    }],
+}
+
+
+def _bs_tables(doc):
+    return [t for t in doc.tables
+            if t.rows[0].cells[0].text.strip().startswith("項目＼年度")]
+
+
+@pytest.fixture
+def builtbs(tmp_path):
+    out = tmp_path / "rbs.docx"
+    _, review = fill_report({"balancesheet": BS}, out)
+    return Document(str(out)), review
+
+
+def test_bs_applicant_values_and_pct(builtbs):
+    doc, _ = builtbs
+    tb = _bs_tables(doc)[0]
+    rows = {r.cells[0].text.strip(): r for r in tb.rows[1:]}
+    assert tb.rows[0].cells[1].text == "2099 年"
+    assert rows["現金"].cells[1].text == "100"
+    assert rows["現金"].cells[2].text == "10.00"
+    assert rows["調整項目"].cells[1].text == "-50"
+    assert rows["調整項目"].cells[2].text == "-5.00"
+    assert rows["資產總額"].cells[2].text == "100.00"
+
+
+def test_bs_guarantor_table_generated_with_5_years(builtbs):
+    doc, _ = builtbs
+    tabs = _bs_tables(doc)
+    assert len(tabs) == 2                       # 申戶 + 保證公司
+    gt = tabs[1]
+    assert len(gt.columns) == 11                # 1 + 5 年 × 2
+    assert gt.rows[0].cells[1].text == "2098 年"
+    titles = "\n".join(p.text for p in doc.paragraphs)
+    assert "◎保證公司-測試開發（虛構）" in titles
+    # 保證公司表列標籤鏡射申戶表
+    assert [r.cells[0].text.strip() for r in gt.rows[1:4]] == \
+        [r.cells[0].text.strip() for r in tabs[0].rows[1:4]]
+
+
+def test_bs_totals_mismatch_reported(builtbs):
+    doc, review = builtbs
+    # 保證公司 2097 年起 資產 1001 ≠ 700+301=1001 → 相符；1002≠700+302=1002 相符…
+    # 申戶 1000 = 600+400 相符 → 唯一不符來自構造：改驗證『無不符時不誤報』
+    assert not any("≠" in r and "申戶" in r for r in review)
+
+
+def test_bs_mismatch_detected(tmp_path):
+    data = {"applicant": {"years": [{"label": "2099 年", "values": {
+        "資產總額": 1000, "負債總額": 600, "淨值總額": 300}}]}}
+    out = tmp_path / "r.docx"
+    _, review = fill_report({"balancesheet": data}, out)
+    assert any("≠" in r or "差" in r for r in review)
+
+
+def test_bs_unknown_label_reported(tmp_path):
+    data = {"applicant": {"years": [{"label": "2099 年", "values": {
+        "不存在的科目": 5, "資產總額": 100}}]}}
+    out = tmp_path / "r.docx"
+    _, review = fill_report({"balancesheet": data}, out)
+    assert any("未知列標籤" in r for r in review)
+
+
 # ── 邊界與錯誤路徑 ───────────────────────────────────────
 def test_luduan_missing_anchor_raises():
     doc = _Doc()  # 空白文件，無「陸、金融借款」標題

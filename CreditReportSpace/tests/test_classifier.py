@@ -118,6 +118,14 @@ def test_classify_encrypted_jcic(tmp_path, make_pdf):
     assert r["entity"] == "測試甲"
 
 
+def test_classify_encrypted_jcic_without_cjk_filename(tmp_path, make_pdf):
+    """Discord 上傳會剝掉附件檔名中的 CJK；加密 PDF 不靠檔名也要歸 jcic。"""
+    f = make_pdf(tmp_path / "01-abcdef12_1150409.pdf", "x", encrypt=True)
+    r = classify_file(f)
+    assert r["encrypted"] is True
+    assert r["type"] == "jcic"
+
+
 def test_classify_scanned_pdf_in_401_folder(tmp_path, make_pdf):
     sub = tmp_path / "401"
     sub.mkdir()

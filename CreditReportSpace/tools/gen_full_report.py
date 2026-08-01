@@ -42,8 +42,8 @@ TYPE_SECTION = {
     "income_mgmt": ("肆一 損益表", "v1"),
     "income_settlement": ("肆一 損益表", "v1"),
     "id": ("捌 保證人基本欄", "v1"),
-    "balancesheet": ("肆三 資產負債表", "v2"),
-    "tax401": ("肆二 401 表", "v2"),
+    "tax401": ("肆二 401 表", "v1"),
+    "balancesheet": ("肆三 資產負債表", "v1"),
     "unknown": ("（無法辨識）", "-"),
 }
 
@@ -51,6 +51,8 @@ TYPE_SECTION = {
 SECTION_FILES = {
     "luduan.json": "luduan",
     "income.json": "income",
+    "tax401.json": "tax401",
+    "balancesheet.json": "balancesheet",
     "guarantor.json": "guarantor",
 }
 
@@ -81,6 +83,8 @@ def summarize_coverage(items):
     checks = [
         ("陸 金融借款", "jcic" in present),
         ("肆一 損益表", bool(present & {"income_mgmt", "income_settlement"})),
+        ("肆二 401 表", "tax401" in present),
+        ("肆三 資產負債表", "balancesheet" in present),
         ("捌 保證人基本欄", "id" in present),
     ]
     for name, ok in checks:

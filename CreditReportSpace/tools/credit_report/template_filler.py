@@ -311,6 +311,214 @@ def _fill_income(doc, section):
     return review
 
 
+# ── 肆二 401 表（申戶／關企）───────────────────────────────
+TAX401_HEADER = ["項目", "年度", "1-2", "3-4", "5-6", "7-8", "9-10", "11-12",
+                 "合計", "月平均"]
+
+
+def _find_tax401_tables(doc):
+    """依模板順序回傳 401 表：[0]=◎申戶、[1]=◎關企。"""
+    out = []
+    for tb in doc.tables:
+        if [c.text.strip() for c in tb.rows[0].cells] == TAX401_HEADER:
+            out.append(tb)
+    return out
+
+
+def _fmt_401(v):
+    return f"{v:,}" if isinstance(v, int) else ""
+
+
+def _fill_tax401_group(tb, years, review, label):
+    """把一組年度資料填進一張 401 表。
+
+    每年兩列：銷貨（月平均＝合計÷月數，四捨五入）、進貨（末欄＝進銷比％）。
+    只吃基本項（雙月值）；合計、月平均、進銷比一律由此處計算。
+    年度數不受模板預留列數限制——不足時以「複製模板末列」動態增列，
+    保留原儲存格字型與列高（直接 add_row 會掉格式）。
+    """
+    from copy import deepcopy
+    while len(tb.rows) < 1 + 2 * len(years):
+        clone = deepcopy(tb.rows[-1]._tr)
+        tb._tbl.append(clone)
+    for yi, y in enumerate(years):
+        sales = list(y.get("sales") or [None] * 6)[:6]
+        purchases = list(y.get("purchases") or [None] * 6)[:6]
+        s_total = sum(v for v in sales if isinstance(v, int)) \
+            if any(isinstance(v, int) for v in sales) else None
+        p_total = sum(v for v in purchases if isinstance(v, int)) \
+            if any(isinstance(v, int) for v in purchases) else None
+        months = y.get("months") or 2 * sum(
+            1 for v in sales if isinstance(v, int))
+        avg = None
+        if isinstance(s_total, int) and months:
+            avg = int(s_total / months + 0.5) if s_total >= 0 else \
+                -int(-s_total / months + 0.5)
+        ratio = ""
+        if isinstance(p_total, int) and isinstance(s_total, int) and s_total:
+            ratio = f"{p_total / s_total * 100:.2f}%"
+
+        r_sales = tb.rows[1 + 2 * yi]
+        r_purch = tb.rows[2 + 2 * yi]
+        year_label = str(y.get("year", ""))
+        row_vals = [
+            (r_sales, ["銷貨", year_label, *[_fmt_401(v) for v in sales],
+                       _fmt_401(s_total), _fmt_401(avg)]),
+            (r_purch, ["進貨", year_label, *[_fmt_401(v) for v in purchases],
+                       _fmt_401(p_total), ratio]),
+        ]
+        for row, vals in row_vals:
+            for ci, val in enumerate(vals):
+                _set_cell_keepfont(row.cells[ci], val)
+            if y.get("needs_review"):
+                for c in row.cells:
+                    _shade(c, REVIEW_YELLOW)
+        if y.get("needs_review"):
+            review.append(
+                f"肆二401（{label}）{year_label} 年：視讀不確定，整年淡黃待人工核對")
+
+
+def _fill_tax401(doc, section):
+    """填肆二 401 表：section = {applicant: {years: […]}, affiliate: {years: […]}}。"""
+    review = []
+    tables = _find_tax401_tables(doc)
+    if len(tables) < 2:
+        raise ValueError("模板找不到 401 表（◎申戶／◎關企）")
+    applicant = section.get("applicant") or {}
+    affiliate = section.get("affiliate") or {}
+    if applicant.get("years"):
+        _fill_tax401_group(tables[0], applicant["years"], review, "申戶")
+    if affiliate.get("years"):
+        _fill_tax401_group(tables[1], affiliate["years"], review, "關企")
+    extra = section.get("extra_affiliates") or []
+    if extra:
+        review.append(
+            f"肆二401：另有 {len(extra)} 家關企超出模板單表容量，未填（需人工併表）")
+    return review
+
+
+# ── 肆三 資產負債表（申戶＝模板表；保證公司＝動態生成）────────
+BS_ANCHOR_CELL = "項目＼年度"
+BS_PCT_BASE = "資產總額"   # 全表百分比以該年資產總額為分母
+
+
+def _find_bs_table(doc):
+    for tb in doc.tables:
+        if tb.rows[0].cells[0].text.strip().startswith(BS_ANCHOR_CELL):
+            return tb
+    return None
+
+
+def _bs_fill_columns(tb, years, review, label, font_pt=None):
+    """把年度資料填進一張資負表（模板表或生成表通用）。
+
+    years[i] = {"label": "2024 年", "values": {列標籤: 仟元整數|null}}。
+    百分比＝值/該年資產總額，工具計算；負值照 -0.79 呈現。
+    另核對 資產總額 ≒ 負債總額＋淨值總額，不符列入回報（照填不擋）。
+    """
+    row_of = {}
+    for ri, row in enumerate(tb.rows):
+        if ri == 0:
+            continue
+        lbl = row.cells[0].text.strip()
+        if lbl and lbl not in row_of:
+            row_of[lbl] = ri
+    ncols = len(tb.columns)
+    max_years = (ncols - 1) // 2
+    if len(years) > max_years:
+        review.append(
+            f"肆三資負（{label}）：{len(years)} 年超過表格 {max_years} 年欄位，超出未填")
+    setter = (_set_cell_keepfont if font_pt is None
+              else lambda c, t: _fill_cell(c, t, font_pt))
+    for yi, y in enumerate(years[:max_years]):
+        vcol, pcol = 1 + 2 * yi, 2 + 2 * yi
+        setter(tb.rows[0].cells[vcol], y.get("label", ""))
+        values = y.get("values") or {}
+        base = values.get(BS_PCT_BASE)
+        unknown = [k for k in values if k not in row_of]
+        if unknown:
+            review.append(
+                f"肆三資負（{label}）{y.get('label','?')}：未知列標籤 {unknown}，未填")
+        for lbl, ri in row_of.items():
+            v = values.get(lbl)
+            setter(tb.rows[ri].cells[vcol], f"{v:,}" if isinstance(v, int) else "")
+            if isinstance(v, int) and isinstance(base, int) and base:
+                setter(tb.rows[ri].cells[pcol], f"{v / base * 100:.2f}")
+            else:
+                setter(tb.rows[ri].cells[pcol], "")
+        debt, equity = values.get("負債總額"), values.get("淨值總額")
+        if all(isinstance(x, int) for x in (base, debt, equity)) \
+                and debt + equity != base:
+            review.append(
+                f"肆三資負（{label}）{y.get('label','?')}：資產總額 {base:,} ≠ "
+                f"負債 {debt:,}＋淨值 {equity:,}（差 {base - debt - equity:,}），"
+                "已照來源填入，請人工確認")
+
+
+def _build_guarantor_bs_table(doc, applicant_tb, name, years):
+    """比照申戶資負表列結構，生成「◎保證公司-<名>」N 年欄表格，回傳 body 元素。"""
+    labels = [applicant_tb.rows[ri].cells[0].text.strip()
+              for ri in range(1, len(applicant_tb.rows))]
+    n = min(len(years), 5)
+    ncols = 1 + 2 * n
+    font_pt = 9 if n >= 5 else 10
+
+    created = []
+    hp = doc.add_paragraph()
+    hp.paragraph_format.space_before = Pt(8)
+    hr = hp.add_run(f"◎保證公司-{name}")
+    _set_run_font(hr, 12, bold=True)
+    created.append(hp._p)
+
+    table = doc.add_table(rows=1 + len(labels), cols=ncols)
+    table.style = "Table Grid"
+    table.autofit = False
+    table.alignment = 1
+    _mark_header_row(table.rows[0])
+    _fill_cell(table.rows[0].cells[0], BS_ANCHOR_CELL, font_pt, bold=True)
+    for yi in range(n):
+        _fill_cell(table.rows[0].cells[1 + 2 * yi], "", font_pt, bold=True)
+        _fill_cell(table.rows[0].cells[2 + 2 * yi], "%", font_pt, bold=True)
+    for ri, lbl in enumerate(labels, start=1):
+        _fill_cell(table.rows[ri].cells[0], lbl, font_pt,
+                   align=WD_ALIGN_PARAGRAPH.LEFT)
+    label_w = 40
+    col_w = (180 - label_w) / (ncols - 1)
+    for r in table.rows:
+        for i, c in enumerate(r.cells):
+            c.width = Mm(label_w if i == 0 else col_w)
+    created.append(table._tbl)
+    return created, table, font_pt
+
+
+def _fill_balancesheet(doc, section):
+    """填肆三：applicant 填模板表；guarantors 各生成一張表接在申戶表之後。"""
+    review = []
+    tb = _find_bs_table(doc)
+    if tb is None:
+        raise ValueError("模板找不到資產負債表（表頭 項目＼年度）")
+    applicant = section.get("applicant") or {}
+    if applicant.get("years"):
+        _bs_fill_columns(tb, applicant["years"], review, "申戶")
+    ref = tb._tbl
+    for g in section.get("guarantors") or []:
+        years = g.get("years") or []
+        if not years:
+            continue
+        if len(years) > 5:
+            review.append(
+                f"肆三資負（{g.get('name','保證公司')}）：{len(years)} 年超過 5 年欄位上限，"
+                "僅填最近 5 年")
+        created, gtb, font_pt = _build_guarantor_bs_table(
+            doc, tb, g.get("name", ""), years)
+        _bs_fill_columns(gtb, years[:5], review, g.get("name", "保證公司"),
+                         font_pt=font_pt)
+        for el in created:
+            ref.addnext(el)
+            ref = el
+    return review
+
+
 # ── 捌 保證人資力（基本欄）─────────────────────────────────
 GUARANTOR_HEADER = ["姓名", "出生年月日", "婚姻", "現職", "電話"]
 
@@ -363,6 +571,8 @@ def _fill_guarantor(doc, section):
 SECTION_FILLERS = {
     "luduan": _fill_luduan,
     "income": _fill_income,
+    "tax401": _fill_tax401,
+    "balancesheet": _fill_balancesheet,
     "guarantor": _fill_guarantor,
 }
 

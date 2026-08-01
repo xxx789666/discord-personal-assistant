@@ -74,8 +74,9 @@ def classify_file(path) -> dict:
     if doc.needs_pass:
         res["encrypted"] = True
         doc.close()
-        if "信用憑證" in stem or "聯徵" in stem:
-            res["type"] = "jcic"
+        # 本工作流裡加密 PDF 只會是聯徵憑證，直接歸 jcic。不要依賴檔名：
+        # Discord 上傳會把附件檔名裡的 CJK 剝掉（「蔡○○信用憑證」→ 消失）。
+        res["type"] = "jcic"
         res["entity"] = _person_from_name(stem)
         res["note"] = "加密（聯徵，需身分證後6碼解密）"
         return res
