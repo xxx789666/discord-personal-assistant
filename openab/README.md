@@ -36,15 +36,18 @@ docker logs openab-kiro --tail 30
 
 ## Discord 配置（伺服器「AA-agent」 1514818023737790614）
 
-| 頻道 | ID | 服務的 bot |
-|---|---|---|
-| #kiro-assistant | 1514819246838780095 | kiro-bridge |
-| #nvidia-lab | 1514819234448933117 | Nvidia-bridge |
-| #travel-planner | 1514819240631206072 | Nvidia-bridge（查證）+ travel-claudebridge（彙整） |
-| #不動產估價 | 1517804694901362752 | Nvidia-bridge（openab-estate 容器，2026-06-20 建）|
-| #a-struct | 1518874308716265643 | openab-astruct |
-| #聯徵報告製作 | `${CREDIT_REPORT_CHANNEL_ID}`（待 bootstrap） | 專用 Codex bot |
-| #一般 | 1514818024467726471 | （無 bot 服務） |
+**6 個頻道、7 個 bot 容器** —— 不是一對一。#travel-planner 由兩個容器共用，
+所以「服務數」不等於「頻道數」。
+
+| 頻道 | ID | 容器 | Bot |
+|---|---|---|---|
+| #kiro-assistant | 1514819246838780095 | openab-kiro | kiro-bridge |
+| #nvidia-lab | 1514819234448933117 | openab-nvidia-lab | Nvidia-bridge |
+| #travel-planner | 1514819240631206072 | **openab-travel-nvidia ＋ openab-travel-claude** | Nvidia-bridge（查證，免費額度）＋ travel-claudebridge（行程彙整）—— 主頻道靠 @ 指定要哪一隻 |
+| #不動產估價 | 1517804694901362752 | openab-estate | Nvidia-bridge（2026-06-20 建）|
+| #a-struct | 1518874308716265643 | openab-astruct | openab-astruct |
+| #聯徵報告製作 | `${CREDIT_REPORT_CHANNEL_ID}` | openab-credit-report | 專用 Codex bot。**已上線**（2026-08-01 手機實測通過）；頻道 ID 不寫死在 config，由 `.local/` 經環境變數注入 |
+| #一般 | 1514818024467726471 | — | （無 bot 服務） |
 
 - **觸發規則**：頻道主訊息要 @（上游硬限制）；討論串內免 @；
   既有助理私訊免 @；**聯徵 bot 明確 `allow_dm = false`，只接受 bootstrap
@@ -97,6 +100,8 @@ Kiro 的「旅遊主題自動寫 vault」規則在 `KiroSpace/AGENTS.md` ＋
 
 `openab-credit-report` 放在 `credit-report` compose profile，完成新 bot token、
 channel ID 與 Codex device auth 前不會被平常的 `docker compose up -d` 啟動。
+**bootstrap 已完成、服務已上線**；profile 閘門保留是刻意的，避免這隻 bot 被
+無意間隨全體啟動——要起它必須明確帶 `--profile credit-report`。
 OpenAB 將 Discord session 交給 `codex-acp`；整合 helper 依
 `sender_context` 回抓原始 PDF/圖片到
 `CreditReportSpace/tmp/docs/intake/<message_id>/`，再由該工作區 agent 流程
