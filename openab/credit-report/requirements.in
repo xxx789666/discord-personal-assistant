@@ -4,3 +4,5 @@
 python-docx==1.2.0
 pytest==9.0.2
 jsonschema==4.26.0
+# intake 層（分類/聯徵解密）讀 PDF 依賴 — CreditReportSpace tools/intake/
+pymupdf==1.27.2.2

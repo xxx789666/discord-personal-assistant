@@ -168,6 +168,82 @@ test("downloads an approved PDF into a message-scoped directory", async () => {
   );
 });
 
+test("message-id latest resolves the newest human message with attachments", async () => {
+  const pdf = Buffer.from("%PDF-1.7\nlatest-test\n");
+  let baseUrl = "";
+  baseUrl = await listen((request, response) => {
+    if (request.url === "/api/channels/12345678901234567/messages?limit=20") {
+      response.setHeader("content-type", "application/json");
+      response.end(
+        JSON.stringify([
+          // 新到舊：最新是 bot 回傳的 DOCX（要跳過），再來才是真人附件訊息
+          {
+            id: "52345678901234567",
+            author: { bot: true },
+            attachments: [{ id: "9", filename: "report.docx" }],
+          },
+          { id: "42345678901234567", author: { bot: false }, attachments: [] },
+          {
+            id: "32345678901234567",
+            author: { bot: false },
+            attachments: [
+              {
+                id: "1",
+                filename: "cred.pdf",
+                content_type: "application/pdf",
+                size: pdf.length,
+                url: `${baseUrl}/cdn/cred.pdf`,
+              },
+            ],
+          },
+        ]),
+      );
+      return;
+    }
+    if (request.url === "/api/channels/12345678901234567/messages/32345678901234567") {
+      response.setHeader("content-type", "application/json");
+      response.end(
+        JSON.stringify({
+          attachments: [
+            {
+              id: "1",
+              filename: "cred.pdf",
+              content_type: "application/pdf",
+              size: pdf.length,
+              url: `${baseUrl}/cdn/cred.pdf`,
+            },
+          ],
+        }),
+      );
+      return;
+    }
+    if (request.url === "/cdn/cred.pdf") {
+      response.setHeader("content-type", "application/pdf");
+      response.end(pdf);
+      return;
+    }
+    response.statusCode = 404;
+    response.end();
+  });
+
+  process.env.DISCORD_TOKEN_CREDIT_REPORT = "offline-test-token";
+  process.env.DISCORD_API_BASE = `${baseUrl}/api`;
+  process.env.DISCORD_ALLOW_INSECURE_TEST_URLS = "1";
+  const workspace = await temporaryDirectory();
+  const destination = path.join(workspace, "tmp", "docs", "intake");
+  process.env.CREDIT_REPORT_WORKSPACE = workspace;
+  process.env.CREDIT_REPORT_CHANNEL_ID = "12345678901234567";
+  const manifest = await downloadAttachments({
+    channelId: "12345678901234567",
+    messageId: "latest",
+    destination,
+  });
+
+  assert.equal(manifest.message_id, "32345678901234567");
+  assert.equal(manifest.files.length, 1);
+  assert.deepEqual(await fs.readFile(manifest.files[0].path), pdf);
+});
+
 test("uploads only a DOCX below the configured workspace", async () => {
   let observedAuthorization = "";
   let observedBody = "";
