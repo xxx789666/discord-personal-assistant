@@ -1,0 +1,16 @@
+# 統一行尾：進 git 一律 LF，簽出也是 LF。
+# 所有 bot 都跑在 Linux 容器裡，CRLF 會讓 shell script 的 shebang 失效
+# （#!/bin/bash\r -> bad interpreter），也會製造整檔 diff 噪音。
+* text=auto eol=lf
+
+# 二進位 —— 絕對不可做行尾轉換。
+# 這些檔案內含的 0x0D 是資料，不是換行；被轉換會靜默損壞。
+# 不依賴 text=auto 的 NUL 位元組猜測，明確宣告。
+*.otf  binary
+*.ttf  binary
+*.pdf  binary
+*.docx binary
+*.png  binary
+*.jpg  binary
+*.jpeg binary
+*.zip  binary
