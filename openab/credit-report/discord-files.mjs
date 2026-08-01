@@ -219,10 +219,34 @@ async function atomicWrite(filePath, bytes) {
   await fs.rename(temporaryPath, filePath);
 }
 
+async function resolveLatestAttachmentMessageId(channelId) {
+  // 手機端在既有討論串補件時，OpenAB 的 sender_context 常缺 message_id，
+  // 且串起始訊息可能已刪（fallback 404）。此模式列出該（已驗證）頻道/討論串
+  // 最近訊息，取「最新一則由真人發、含附件」的訊息。範圍僅此頻道、僅最近
+  // 20 則——不是任意歷史搜尋。
+  const response = await discordFetch(
+    `${apiBase()}/channels/${channelId}/messages?limit=20`,
+  );
+  const messages = await response.json();
+  if (!Array.isArray(messages)) fail("Discord message list response is invalid");
+  for (const message of messages) {
+    // Discord 回傳新到舊；跳過 bot 自己的訊息（例如已回傳的 DOCX）。
+    if (message?.author?.bot) continue;
+    if (Array.isArray(message.attachments) && message.attachments.length > 0) {
+      return validateSnowflake(String(message.id || ""), "resolved message ID");
+    }
+  }
+  fail("no recent user message with attachments in this channel/thread");
+}
+
 export async function downloadAttachments({ channelId, messageId, destination }) {
   validateSnowflake(channelId, "channel ID");
-  validateSnowflake(messageId, "message ID");
+  const useLatest = messageId === "latest";
+  if (!useLatest) validateSnowflake(messageId, "message ID");
   await assertAllowedChannel(channelId);
+  if (useLatest) {
+    messageId = await resolveLatestAttachmentMessageId(channelId);
+  }
   const maxFileBytes = positiveIntFromEnv(
     "CREDIT_REPORT_MAX_ATTACHMENT_BYTES",
     DEFAULT_MAX_FILE_BYTES,
@@ -661,6 +685,7 @@ function parseArguments(argv) {
 function usage() {
   return `Usage:
   discord-files.mjs download --channel-id ID --message-id ID --dest DIR
+    (--message-id latest = 抓該頻道/討論串最新一則由真人發、含附件的訊息)
   discord-files.mjs upload --channel-id ID --file PATH [--reply-to ID] [--content TEXT]
   discord-files.mjs clean --message-id ID [--dest DIR]
 

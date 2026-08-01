@@ -14,3 +14,7 @@ tmp/**
 __pycache__/
 *.py[cod]
 .pytest_cache/
+
+# coverage 報告產物
+.coverage
+htmlcov/
