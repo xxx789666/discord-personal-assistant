@@ -27,9 +27,24 @@
 
 ---
 
-## Task 1: Spike — 確認地區頁 URL 與 robots 允許範圍
+## Task 1: Spike — 確認地區頁 URL 與 robots 允許範圍 ✅ 已完成 2026-08-04
 
-**這是所有後續工作的前提。** 若地區頁被 robots 禁止或格式與預期不符，後面的任務都要改。
+**結論（三項，都改變了後續設計）：**
+
+1. **必須用 `truststore`** —— 容器內 httpx 預設 SSL 驗證失敗於
+   `CERTIFICATE_VERIFY_FAILED: Missing Subject Key Identifier`。
+2. **robots.txt 只宣告 `User-Agent: OAI-SearchBot`**（無 `*` group），
+   `Allow: /` 加四條 Disallow。`/region/` 未禁；仍照樣遵守那四條。
+3. **區級 URL 不存在，且錯誤 slug 會靜默回退**：
+   `/region/桃園市桃園區_c/` 回的是**台北市**物件，`/region/桃園市_c/` 才正確。
+   城市頁自產的 27 個 `/region/` 連結全是 `?od=` 排序與 `?pg=` 分頁，無區級連結；
+   無區選單，區篩選是 JS 驅動。
+   → **只有 `--city` 進 URL**，district/road/type 全部客戶端篩選。
+   → **必須加防護**：回傳縣市與請求不符即中止。
+
+fixture 已抓（`tests/fixtures/housefun_list.html`，30 張卡片），七個選擇器全部驗證通過。
+
+以下原始步驟保留供追溯。
 
 **Files:**
 - 產出：`tests/fixtures/housefun_list.html`
@@ -533,14 +548,15 @@ class ListingFetchError(RuntimeError):
     pass
 
 
-def region_url(city: str, district: str, page: int) -> str:
-    """區級地區頁。<Task 1 Step 2 確認的格式>"""
-    slug = urllib.parse.quote(f"{city}{district}_c")
+def region_url(city: str, page: int) -> str:
+    """城市級地區頁。區級 URL 不存在 —— 錯誤 slug 會靜默回退到台北市，
+    所以只有縣市能進 URL，區與路名一律客戶端篩選（Task 1 spike 結論）。"""
+    slug = urllib.parse.quote(f"{city}_c")
     base = f"{BASE_URL}/region/{slug}/"
     return base if page == 1 else f"{base}?pg={page}"
 
 
-async def _fetch_pages(city: str, district: str, max_pages: int) -> list[Listing]:
+async def _fetch_pages(city: str, max_pages: int) -> list[Listing]:
     client = httpx.AsyncClient(
         timeout=30,
         follow_redirects=False,
