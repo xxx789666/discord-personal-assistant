@@ -12,7 +12,7 @@
 合規（沿用 property-case-radar crawlers/sale/housefun_source.py 已驗證的行為）：
   - 每次執行先讀 robots.txt 並驗證目標路徑
   - User-Agent 標明來源與用途，不偽裝瀏覽器
-  - 請求間隔 >= 2 秒、頁數上限 3
+  - 請求間隔 >= 2 秒、頁數上限 10（見 MAX_PAGES 的說明）
   - 絕不觸碰 /building/building_street*（robots.txt 明文禁止的街道層級頁）
 
 只能查到城市級（2026-08-04 實測）：
@@ -54,7 +54,12 @@ USER_AGENT = (
     "(+https://github.com/xxx789666/discord-personal-assistant)"
 )
 MIN_DELAY_SECONDS = 2.0
-MAX_PAGES = 3
+# 臺北市的 /region/ 有 271 頁（約 8100 筆），抓 N 頁只看得到 N×30 筆。
+# 上游 Radar 的 CompliancePolicy 訂 3 頁，那是為「每天廣掃新案」設計的；
+# 定點估價需要足夠的區級樣本，所以放寬到 10 頁（約 300 筆、20 秒）。
+# 即使如此仍只是全市的 ~3.7% 抽樣 —— **找不到特定一棟是常態**，
+# 使用者手上的個案資訊一律優先（AGENTS.md §銷售中參照）。
+MAX_PAGES = 10
 MIN_SAMPLES = 3
 
 LAND_TYPES = ("土地", "農地", "建地", "工業用地")
