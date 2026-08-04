@@ -28,6 +28,8 @@
 ### 不動產估價 — `EstateSpace/`　#不動產估價
 - [AGENTS.md](EstateSpace/AGENTS.md) — 角色規則（標示部禁自動化，由使用者人工貼）
 - [Output/](EstateSpace/Output/README.md) — 估價報告與成交比價產出
+- [docs/estate/](docs/estate/2026-08-04-listing-reference-design.md) — 設計與實作計畫
+  （**刻意放在工作區外** —— agent 掛載的是 `EstateSpace/`，設計文件放進去只會佔它的 context）
 
 ### 夜盤閘門法 — `AStructSpace/`　#a-struct
 - [AGENTS.md](AStructSpace/AGENTS.md) — 審核規則
