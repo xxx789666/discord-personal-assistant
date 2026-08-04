@@ -14,7 +14,7 @@
 uv run tools/lvr.py --city 桃園市 --road 永安路
 
 # 收斂條件：型態 + 用途 + 屋齡範圍 + 年限
-uv run tools/lvr.py --city 桃園市 --road 永安路 --years 5 \
+uv run tools/lvr.py --city 桃園市 --road 永安路 --years 4 \
     --type 透天 --use 住家用 --min-age 24 --max-age 34
 
 # 限定鄉鎮市區、放大筆數
@@ -24,12 +24,40 @@ uv run tools/lvr.py --city 桃園市 --road 永安路 --town 桃園區 --limit 8
 uv run tools/lvr.py --city 桃園市 --road 永安路 --include-special
 
 # 土地/農地估價：加 --land，--road 填地段名，--zone 填使用分區（農/住/商/工）
-uv run tools/lvr.py --city 桃園市 --road 賦北段 --land --zone 農 --years 5
+uv run tools/lvr.py --city 桃園市 --road 賦北段 --land --zone 農 --years 4
 ```
+
+## 銷售中物件參照 `tools/listing.py`
+
+好房網公開地區頁的**銷售中物件開價**，扣議價空間後供交叉驗證。
+與 `lvr.py` 互補：成交是事實但有登錄時間差，開價即時但含賣方意圖。
+
+```bash
+# 區級查詢（--district 是回傳後篩選，不是 URL 參數）
+uv run tools/listing.py --city 桃園市 --district 桃園區
+
+# 收斂型態；路名（樣本通常不足，會自動放寬回全區並在輸出說明）
+uv run tools/listing.py --city 桃園市 --district 桃園區 --road 永安路 --type 住宅大樓
+
+# 土地；議價空間改 12%（預設 8%）
+uv run tools/listing.py --city 桃園市 --district 平鎮區 --land --discount 0.12
+```
+
+輸出含每筆（地址／型態／坪數／開價單坪／折後單坪）與兩組統計（開價、折後）。
+查不到時印「無銷售中參照」並正常結束，**不阻斷估價**。
+
+**只能查到城市級**：好房網沒有區級 URL，且未知地區代碼會**靜默回退**到別的縣市
+（實測回台北市）而非報錯。工具已內建防護 —— 回傳縣市與請求不符即中止並報錯。
+所以 `--city` 必須寫對（是「桃園市」不是「桃園縣」）。
+
+型態是從樓層字串推論的（卡片沒有型態欄位）：`--/--` 是土地、`1~4/4` 是透天、
+單層依總樓層分公寓／華廈／住宅大樓。公寓與華廈那條界線是依慣例推估，非站方標示。
+
+合規：每次執行先驗 robots.txt、User-Agent 標明來源、請求間隔 ≥2 秒、頁數上限 3。
 
 常用參數：`--type`（透天/公寓/華廈/住宅大樓）、`--use`（住家用/住商用/商業用）、
 `--min-age`/`--max-age`（屋齡）、`--min-area`/`--max-area`（坪數）、
-`--years`（近幾年，**預設 3，房屋/土地皆同**；樣本不足才照 SOP 階梯放寬到 5）、
+`--years`（近幾年，**預設 2，房屋/土地皆同**；樣本不足才照 SOP 階梯放寬到 4）、
 `--limit`、`--refresh`（強制重抓）。
 **土地模式**：`--land`（只比純土地交易、用土地面積算單價）、`--zone`（使用分區關鍵字）。
 **鄰近類似物件**：`--road` 留空 ＋ `--town <區>` ＋ `--type`/`--zone` → 查整區同型態/同分區。

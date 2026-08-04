@@ -15,7 +15,7 @@
 
 用法（容器內走 uv，會自動準備 python 與套件）：
     uv run tools/lvr.py --city 桃園市 --road 永安路
-    uv run tools/lvr.py --city 桃園市 --road 永安路 --years 5 --type 透天
+    uv run tools/lvr.py --city 桃園市 --road 永安路 --years 4 --type 透天
     uv run tools/lvr.py --city 桃園市 --road 永安路 --use 住家用 --min-area 60
     uv run tools/lvr.py --city 桃園市 --road 永安路 --include-special   # 不剔除特殊交易
 
@@ -199,7 +199,7 @@ def main() -> int:
     p.add_argument("--zone", default="",
                    help="土地模式用：使用分區關鍵字，如 農（農業區）/ 住 / 商 / 工")
     p.add_argument("--years", type=int, default=None,
-                   help="近 N 年成交（未指定預設 3 年，房屋與土地皆同）")
+                   help="近 N 年成交（未指定預設 2 年，房屋與土地皆同）")
     p.add_argument("--low-ratio", type=float, default=None,
                    help="土地模式：剔除單價低於『中位數×此比例』的畸零地/道路用地"
                         "（預設 0.4；設 0 關閉）")
@@ -223,7 +223,7 @@ def main() -> int:
 
     # 預設年限：房屋與土地都先查 3 年（不足再由 SOP 階梯放寬）
     if a.years is None:
-        a.years = 3
+        a.years = 2
     # 畸零地剔除比例：土地預設 0.4，建物不啟用
     low_ratio = a.low_ratio if a.low_ratio is not None else (0.4 if a.land else 0.0)
 
@@ -311,7 +311,7 @@ def main() -> int:
         broaden = ("--road 留空＋--town＋--zone 查整區同分區農地"
                    if a.land else "--road 留空＋--town＋--type 查整區同型態物件")
         print(f"\n找不到符合條件的{mode}成交案：{a.city} {scope}（近 {a.years} 年）。"
-              f"\n依 SOP 放寬：①先查鄰近/整區類似物件（{broaden}）；②仍不足再 --years 5；"
+              f"\n依 SOP 放寬：①先查鄰近/整區類似物件（{broaden}）；②仍不足再 --years 4；"
               f"③或確認縣市/地段名是否正確。")
         return 0
 
@@ -363,7 +363,7 @@ def main() -> int:
     else:
         print(f"\n[可比案] ⚠ 有效可比案僅 {n_valid} 筆，未達 3 筆門檻 — 依 SOP 放寬："
               f"先試鄰近地段/類似物件（--road 留空＋--town{'＋--zone' if a.land else '＋--type'}），"
-              f"仍不足再 --years 5")
+              f"仍不足再 --years 4")
     if valid:
         unit_fmt = "{:.2f}" if a.land else "{:.1f}"
         print(f"\n=== 單價統計（官方單價，萬/坪；已排除特殊交易"
