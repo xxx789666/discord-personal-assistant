@@ -221,7 +221,7 @@ def main() -> int:
         print("請至少指定 --road（路名/地段）或 --town（鄉鎮市區）。", file=sys.stderr)
         return 2
 
-    # 預設年限：房屋與土地都先查 3 年（不足再由 SOP 階梯放寬）
+    # 預設年限：房屋與土地都先查 2 年（不足再由 SOP 階梯放寬到整區、再到 4 年）
     if a.years is None:
         a.years = 2
     # 畸零地剔除比例：土地預設 0.4，建物不啟用
