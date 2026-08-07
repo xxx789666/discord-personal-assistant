@@ -20,6 +20,7 @@ import argparse
 import json
 import os
 import sys
+import urllib.parse
 
 import requests
 
@@ -32,6 +33,17 @@ BASE = os.environ.get("STEEL_API_BASE", "http://steel-api:3000")
 # 搜尋走自架 SearXNG（搜尋引擎的結果頁會擋 headless，不要用 scrape 搜尋）
 SEARX = os.environ.get("SEARX_BASE", "http://searxng:8080")
 TIMEOUT = 90
+
+# 已知會擋 headless 的網域 —— 直接拒絕，不要進瀏覽器。
+# Steel 目前 SKIP_FINGERPRINT_INJECTION=true，這些站的 bot 防護一定觸發，
+# 抓回來是空白，還會在瀏覽器裡留下無限重試的挑戰頁（見 _release_session）。
+# 這些站的資料用 search 的摘要就拿得到，不需要 scrape。
+BLOCKED_HOSTS = {
+    "rakuya.com.tw": "樂屋網有 Cloudflare Turnstile，headless 必定被擋",
+    "www.rakuya.com.tw": "樂屋網有 Cloudflare Turnstile，headless 必定被擋",
+    "591.com.tw": "591 反爬強，且條款禁止自動化擷取",
+    "www.591.com.tw": "591 反爬強，且條款禁止自動化擷取",
+}
 
 
 def search(query: str, limit: int) -> int:
@@ -56,17 +68,40 @@ def search(query: str, limit: int) -> int:
     return 0
 
 
+def _release_session() -> None:
+    """關掉瀏覽器裡殘留的分頁。
+
+    被擋的頁面（Cloudflare Turnstile 等）留在瀏覽器裡不會自己停 —— 它的 JS 會
+    無限重試。2026-08-04 一次 scrape 樂屋網失敗後，Steel 連續三天對該站發出約
+    15000 個請求（每天 5000），吃掉 1.1 GB 記憶體與 11% CPU，直到手動重啟才停。
+    所以只要抓回空白（＝被擋），立刻釋放 session。
+    """
+    try:
+        requests.post(f"{BASE}/v1/sessions/release", json={}, timeout=15)
+    except requests.RequestException:
+        pass
+
+
 def scrape(url: str, delay: int | None, max_chars: int) -> int:
+    host = urllib.parse.urlparse(url).netloc.lower()
+    for blocked, why in BLOCKED_HOSTS.items():
+        if host == blocked or host.endswith("." + blocked):
+            print(f"拒絕抓取 {host} — {why}\n"
+                  f"改用：uv run tools/web.py search \"關鍵字\"（搜尋摘要通常就夠）",
+                  file=sys.stderr)
+            return 2
     body: dict = {"url": url, "format": ["markdown"]}
     if delay:
         body["delay"] = delay
     r = requests.post(f"{BASE}/v1/scrape", json=body, timeout=TIMEOUT)
     if not r.ok:
         print(f"scrape failed: HTTP {r.status_code} {r.text[:300]}", file=sys.stderr)
+        _release_session()
         return 1
     md = (r.json().get("content") or {}).get("markdown") or ""
     if not md.strip():
-        print("(empty markdown — page may need --delay or be blocked)")
+        _release_session()
+        print("(empty markdown — 該頁被擋或需要 --delay；已釋放 session 避免殘留重試迴圈)")
         return 0
     # 截斷保護：完整頁面動輒數萬字元，連抓幾頁就會撐爆模型 context
     # （NIM 端的症狀是 EngineCore error / -32603，2026-06-12 實測）。

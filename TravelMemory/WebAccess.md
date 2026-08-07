@@ -21,6 +21,18 @@ uv run tools/web.py screenshot https://example.com /tmp/shot.png
 uv run tools/web.py pdf https://example.com /tmp/page.pdf
 ```
 
+## 不要 scrape 反爬站
+
+`tools/web.py scrape` 內建網域黑名單（樂屋網、591），打到會直接 exit 2 並要你改用
+`search`。**這不是保守，是踩過的坑**：2026-08-04 一次抓樂屋網失敗後，被擋的
+Cloudflare 挑戰頁留在瀏覽器裡自己重試，Steel 連續三天對該站發出約 15000 個請求
+（每天 5000），吃掉 1.1 GB 記憶體與 11% CPU，直到手動重啟才停。
+
+現在抓回空白時會自動 `sessions/release` 關掉殘留分頁。要新增黑名單網域，
+改 `tools/web.py` 的 `BLOCKED_HOSTS`。
+
+這些站的資料**用 `search` 的摘要通常就拿得到**，不需要 scrape。
+
 ## 搜尋的做法
 
 **搜尋一律用 search 子指令**（走自架 SearXNG 的 JSON API）：

@@ -85,6 +85,12 @@ uv run tools/web.py search "關鍵字"
 注意：Steel 反偵測層停用中，搜尋引擎結果頁會擋 → 搜尋用 `search` 子指令
 （走 SearXNG），不要 scrape Google。一次估價以 3～5 次 scrape 為限，避免撐爆 context。
 
+⚠ **`scrape` 內建網域黑名單**（樂屋網、591），打到直接 exit 2。**這是踩過的坑**：
+2026-08-04 一次抓樂屋網失敗後，被擋的 Cloudflare 挑戰頁留在瀏覽器裡自己重試，
+Steel 連續三天對該站發出約 15000 個請求（每天 5000），吃掉 1.1 GB 記憶體與 11% CPU，
+直到手動重啟才停。現在抓回空白會自動 `sessions/release` 關掉殘留分頁。
+要加黑名單網域，改 `tools/web.py` 的 `BLOCKED_HOSTS`。房產站用 `search` 摘要就夠。
+
 ### 估價定點查詢（`listing.py` 做不到的部分）
 
 `listing.py` 只有 3~4% 覆蓋率，查不到特定一棟。同棟資訊靠兩次搜尋就能拿到，
