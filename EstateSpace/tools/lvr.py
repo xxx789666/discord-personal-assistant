@@ -133,6 +133,23 @@ def fetch_season(code: str, season: str, refresh: bool) -> str | None:
     return None
 
 
+_FULLWIDTH_DIGITS = str.maketrans("０１２３４５６７８９", "0123456789")
+
+
+def halfwidth(s: str) -> str:
+    """把全形數字轉半形，供門牌比對用（不影響顯示，顯示仍用原字串）。
+
+    實價登錄 open data 的門牌是**全形數字**：「八德路二段４５１巷１號三樓」。
+    使用者與 agent 打的一律是半形（`--road 八德路二段451巷`），子字串比對必然
+    落空，工具卻只回「找不到符合條件的成交案」，看起來像該路段真的沒有交易。
+
+    2026-08-08 實測：`--road 八德路二段451巷` 查無，`--road 八德路二段４５１巷`
+    查到 1121109 那筆 5,950 萬。此前多輪估價都因此誤判「同路段 0 筆」而放寬到
+    整區，放大了樣本雜訊。
+    """
+    return s.translate(_FULLWIDTH_DIGITS)
+
+
 def roc_to_parts(s: str) -> tuple[int, int]:
     """民國日期字串（如 1140116 / 0740812）→ (西元年, 月)。無法解析回 (0,0)。"""
     s = "".join(ch for ch in (s or "") if ch.isdigit())
@@ -243,16 +260,21 @@ def main() -> int:
 
     comps = []
     got_seasons = []
+    # 門牌比對一律在半形空間進行（open data 是全形數字，使用者打的是半形）
+    road_n = halfwidth(a.road)
+    town_n = halfwidth(a.town)
+
     for season in seasons:
         text = fetch_season(code, season, a.refresh)
         if not text:
             continue
         got_seasons.append(season)
         for r in parse_rows(text):
-            if a.road not in r["addr"]:
+            addr_n = halfwidth(r["addr"])
+            if road_n not in addr_n:
                 continue
             # 鄉鎮市區是獨立欄位（土地門牌不含區名），故比對 town 欄＋門牌兩者
-            if a.town and a.town not in (r["town"] + r["addr"]):
+            if town_n and town_n not in (halfwidth(r["town"]) + addr_n):
                 continue
             if r["deal_int"] < cutoff:
                 continue
