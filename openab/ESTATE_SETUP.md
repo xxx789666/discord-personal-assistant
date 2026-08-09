@@ -45,7 +45,11 @@
   `tool_display = "compact"`，十行指令變成 `✅ 10 tool(s)`。
 - **成本 1.32 credits／次**（8 個計費事件加總；context 只用了 200k 的 3.9%）。
   對照 KIRO_SETUP.md 記的簡單查證 0.05–0.2，估價一輪貴 7~25 倍。
-  **要推廣到其他頻道前先確認 AWS Builder ID 的月額度。**
+  **KIRO FREE（AWS Builder ID）每月 50 credits** → 約 37 次估價／月，
+  且與 #kiro-assistant 共用同一帳號額度。PRO $20/月＝1000 credits，
+  超額 add-on $0.04/credit。`kiro-cli` 查不到用量（`user profile` 只服務
+  IAM Identity Center／外部 IdP），要上 kiro.dev 後台看。
+  **現行決定：只有估價頻道用 kiro，nvidia-lab／travel-nvidia 維持 NIM 免費。**
 - 它自己發現了前幾輪都沒人提的關鍵事實：「門牌巷弄（451巷），非八德路正面臨路」
   —— 這對一樓店面估值影響很大。
 
