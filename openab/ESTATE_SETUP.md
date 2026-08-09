@@ -35,7 +35,27 @@
 | minimax-m3（NIM） | 7分10秒 | 9 | 11 條規則全過 |
 | gpt-oss-20b（NIM） | 11 秒 | 2 | 跳過大半 SOP、表格重複列、給出無依據數字 |
 | gpt-oss-120b（NIM） | 11 秒 | 2 | 同上 |
-| kiro-cli | 待測 | — | Claude 系＋OpenAB 官方預設後端 |
+| **kiro-cli** | **2分13秒** | **10** | **全部規則通過，含 minimax 解不掉的中間訊息** |
+
+**2026-08-09 實測結果（同一標的，第四輪）**：Kiro 比 minimax 快 3.2 倍且品質更好。
+
+- **中間訊息問題解決了。** minimax 四次改 prompt 都失敗（它在 ACP 下沒有獨立
+  推理通道，規劃只能走 assistant text），Kiro 一次就照規則 3 的格式輸出
+  `⋯ 查同棟建案資訊　⋯ 放寬查整區…`——一行進度、無數字。搭配
+  `tool_display = "compact"`，十行指令變成 `✅ 10 tool(s)`。
+- **成本 1.32 credits／次**（8 個計費事件加總；context 只用了 200k 的 3.9%）。
+  對照 KIRO_SETUP.md 記的簡單查證 0.05–0.2，估價一輪貴 7~25 倍。
+  **要推廣到其他頻道前先確認 AWS Builder ID 的月額度。**
+- 它自己發現了前幾輪都沒人提的關鍵事實：「門牌巷弄（451巷），非八德路正面臨路」
+  —— 這對一樓店面估值影響很大。
+
+**登入的坑（花了四次才過）**：`kiro-cli whoami` 顯示已登入**不代表能推論**。
+先用 `x011training@gmail.com` 登入成功但推論回 `Authentication failed`（該
+Builder ID 沒有 Kiro 推論權限）。改用 `xxx69579575@gmail.com` 時前三次都失敗，
+因為瀏覽器已登入舊帳號會直接沿用身分授權，且該帳號是 **Google 註冊**的 ——
+打 email+密碼會被擋（"already associated with a different sign-in method"）。
+**正解：無痕視窗 ＋ 點「Sign in with Google」。**
+驗證一定要跑兩步：`kiro-cli whoami` 看 email，再 `kiro-cli chat` 實際推論一次。
 
 兩個 gpt-oss 都只跑 `lvr.py` 就下結論，沒查同棟錨點、沒跑 `listing.py`。
 **單回合 benchmark 完全預測不了八回合的表現**（20b 在 benchmark 上是最快且
