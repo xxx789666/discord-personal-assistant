@@ -42,6 +42,12 @@ session_ttl_hours = 2
 [reactions]
 enabled = true
 remove_after_reply = false
+# 工具呼叫顯示（docs/tool-display.md，0.8.4 起支援）：full | compact | none
+# 估價一輪要跑 8~9 次 shell，full 會把每一行 `uv run tools/lvr.py --city …`
+# 都印進 Discord，回覆看起來很雜。改 compact 只留一行計數。
+# 注意：這只管「工具行」，agent 自己的敘述文字（「我先查同棟…」）不受影響 ——
+# 那是 assistant text，openab 沒有過濾設定（2026-08-07 查證 config-reference）。
+tool_display = "compact"
 
 # 語音訊息轉文字 — 同其他 bridges 的 Groq whisper 設定。
 [stt]
