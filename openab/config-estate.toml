@@ -32,18 +32,24 @@ working_dir = "/workspace/EstateSpace"
 #   OPENAI_API_KEY/BASE_URL/MODEL — qwen-code 的 OpenAI 相容供應商三件套，
 #     指向 NVIDIA NIM（key 來自 ../.local/nvidia.env）。換模型改 OPENAI_MODEL。
 #
-# 2026-08-09 換模型實測（原為 minimaxai/minimax-m3）。單回合 benchmark
-# 帶 10KB AGENTS.md，中位延遲／首回合工具呼叫成功率：
-#   minimax-m3   4.2s  4/4   → 實測 7分10秒、9 次 shell、規則全過
-#   gpt-oss-20b  2.25s 4/4   → **實測 11 秒、2 次 shell、跳過大半 SOP**
-#   gpt-oss-120b 3.2s  3/4   → 本次試用
-# 20b 的教訓：單回合 benchmark 完全預測不了整輪表現。它快 40 倍，但沒查同棟
-# 錨點、沒跑銷售中參照、沒問坪數歧義，還在可比案表格裡重複列同一筆、
-# 對全是樓上層的樣本直接算出估價數字。速度不是這裡的瓶頸，規則遵守才是。
-# 不滿意就改回 minimaxai/minimax-m3（唯一驗證過全部規則的設定）。
+# ⚠ 2026-08-09 換模型實測結論：**不要換**。這是 NIM 上唯一撐得住這份 SOP 的模型。
+#
+#   模型            單回合benchmark      實測整輪
+#   minimax-m3      4.2s  工具 4/4      7分10秒、9 次 shell、11 條規則全過
+#   gpt-oss-20b     2.25s 工具 4/4      11 秒、2 次 shell、跳過大半 SOP
+#   gpt-oss-120b    3.2s  工具 3/4      11 秒、2 次 shell、同樣跳過
+#
+# 兩個 gpt-oss 都只跑 lvr.py 就直接下結論：沒查同棟建案名與成交錨點、
+# 沒跑 listing.py 銷售中參照、沒問坪數歧義、沒比對各站坪數落差，
+# 然後拿「整區中位數」（AGENTS.md 明文標為不參與計算）乘坪數算出估價數字。
+# 120b 還自稱「符合 SOP 取最接近的數筆」，實際用的是全部 28 筆的中位數。
+#
+# 教訓：**單回合 benchmark 完全預測不了八回合的表現**。速度從不是瓶頸 ——
+# minimax 慢是慢，但它會照 SOP 一步步查；快 40 倍的代價是不做事。
+# 要再提速只能換方向（換成有帳號的 Claude Code、或縮短 AGENTS.md），不是換 NIM 模型。
 # 註：moonshotai/kimi-k2.6 仍列在 /v1/models 但實際呼叫回 404，不可用。
 #   GROQ_API_KEY — Discord 語音轉文字（[stt]）用。
-env = { OPENAI_API_KEY = "${NVIDIA_API_KEY}", OPENAI_BASE_URL = "https://integrate.api.nvidia.com/v1", OPENAI_MODEL = "openai/gpt-oss-120b", GROQ_API_KEY = "${GROQ_API_KEY}" }
+env = { OPENAI_API_KEY = "${NVIDIA_API_KEY}", OPENAI_BASE_URL = "https://integrate.api.nvidia.com/v1", OPENAI_MODEL = "minimaxai/minimax-m3", GROQ_API_KEY = "${GROQ_API_KEY}" }
 
 [pool]
 # 同 nvidia-lab：max_sessions=1 時主頻道與討論串會搶唯一槽位而靜默無回應。
