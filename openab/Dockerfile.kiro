@@ -16,4 +16,9 @@ RUN apt-get update \
  && rm -rf /var/lib/apt/lists/* \
  && pip3 install --no-cache-dir --break-system-packages \
       yt-dlp youtube-transcript-api requests
+
+# uv — EstateSpace 的工具（lvr.py / listing.py / web.py）用 PEP 723 inline
+# 相依，一律 `uv run` 執行。原本只有 nvidia image 有 uv；估價頻道 2026-08-09
+# 改用 kiro 後端（見 config-estate.toml 的實測紀錄），這個 image 也需要。
+COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /usr/local/bin/
 USER agent

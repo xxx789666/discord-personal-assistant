@@ -85,17 +85,24 @@ services:
   # 登錄 open data 比價估價；標示部由使用者人工貼（不碰付費的 pqt 地政電傳）。
   # SOP 見 EstateSpace/AGENTS.md。新 qwen state volume 首次啟動前需 chown
   # 1000:1000（坑 2），並 docker cp 繁中 output-language.md（坑 4）。
+  # 2026-08-09 後端從 qwen-code→NIM 改為 kiro-cli（見 config-estate.toml 的
+  # 實測紀錄：兩個 gpt-oss 都跳過 SOP，minimax 守規則但一輪 7 分鐘）。
+  # 用 openab-kiro:tools（同 #kiro-assistant 的 image，2026-08-09 加裝 uv —
+  # EstateSpace 的工具全走 `uv run`）。認證 volume **刻意不共用 kiro 頻道的
+  # aiquant_kiro_auth**：一來兩個容器同時 refresh AWS token 有競態，
+  # 二來那是 AIQuant 的 volume，共掛會加深跨系統耦合。改用自己的一組，
+  # 首次啟動要各別做 device-flow 登入（見 ESTATE_SETUP.md）。
   openab-estate:
-    image: openab-nvidia:qwen
+    image: openab-kiro:tools
     container_name: openab-estate
     restart: unless-stopped
     env_file:
       - ../.local/discord_token.env
-      - ../.local/nvidia.env        # NVIDIA_API_KEY
       - ../.local/groq.env
     volumes:
       - "D:/discord 個人助理/EstateSpace:/workspace/EstateSpace"
-      - assistant_estate_qwen_state:/home/node/.qwen
+      - assistant_estate_kiro_state:/home/agent/.kiro
+      - assistant_estate_kiro_auth:/home/agent/.local/share/kiro-cli
       - ./config-estate.toml:/etc/openab/config.toml:ro
 
   # ─────────────────────────────────────────────────────────────────────────
@@ -261,7 +268,13 @@ volumes:
   # 聯徵報告 bot 的獨立 Codex/ChatGPT OAuth state（首次 chown + device auth）。
   assistant_creditreport_codex_state:
     name: assistant_creditreport_codex_state
-  # 估價 bot 的 qwen state（非 external，compose 自建；首次啟動前須 chown 1000）。
+  # 估價 bot 的 kiro state / AWS Builder ID 認證（非 external，compose 自建；
+  # 首次啟動後須 chown 1000 再 device-flow 登入 — 見 ESTATE_SETUP.md）。
+  # 舊的 assistant_estate_qwen_state 留著沒刪，退回 qwen 後端時可直接復用。
+  assistant_estate_kiro_state:
+    name: assistant_estate_kiro_state
+  assistant_estate_kiro_auth:
+    name: assistant_estate_kiro_auth
   assistant_estate_qwen_state:
     name: assistant_estate_qwen_state
   # travel-claude 的獨立 Pro 帳號 OAuth state（2026-06-12 與 host Max 帳號分家）。

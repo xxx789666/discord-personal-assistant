@@ -23,33 +23,37 @@ allowed_users = [
 ]
 
 [agent]
-command = "qwen"
-args = ["--acp"]
+# 2026-08-09 從 qwen-code→NIM 改為 kiro-cli（OpenAB 官方預設後端，原生 ACP）。
+# 換的理由是**規則遵守**不是速度 —— 見下方實測紀錄。
+command = "kiro-cli"
+args = ["acp", "--trust-all-tools"]
 # EstateSpace 是唯一掛載的工作區（docker-compose.yml）。AGENTS.md 定義角色與
-# 估價 SOP（QWEN.md 轉指過去），WebAccess.md 是 tools/lvr.py 用法。
+# 估價 SOP，WebAccess.md 是 tools/*.py 用法。QWEN.md 是 qwen 時代的轉指檔，
+# kiro 不讀它，AGENTS.md 本來就在根目錄會被自動讀入。
 working_dir = "/workspace/EstateSpace"
-# 注入 qwen 子行程的變數（同 config-nvidia-lab.toml）：
-#   OPENAI_API_KEY/BASE_URL/MODEL — qwen-code 的 OpenAI 相容供應商三件套，
-#     指向 NVIDIA NIM（key 來自 ../.local/nvidia.env）。換模型改 OPENAI_MODEL。
+# GROQ_API_KEY 給 [stt] 語音轉文字用（agent 子行程本身用不到，但保持與其他
+# bridge 一致）。NIM 的 OPENAI_* 三件套已移除 —— kiro-cli 走 AWS Builder ID，
+# 認證在 aiquant_kiro_auth volume，不吃 NVIDIA key。
+env = { GROQ_API_KEY = "${GROQ_API_KEY}" }
 #
-# ⚠ 2026-08-09 換模型實測結論：**不要換**。這是 NIM 上唯一撐得住這份 SOP 的模型。
-#
-#   模型            單回合benchmark      實測整輪
+# ── 為什麼離開 NIM：2026-08-09 三個模型的實測 ──────────────────────
+#   模型            單回合benchmark      實測整輪（同一個估價標的）
 #   minimax-m3      4.2s  工具 4/4      7分10秒、9 次 shell、11 條規則全過
 #   gpt-oss-20b     2.25s 工具 4/4      11 秒、2 次 shell、跳過大半 SOP
 #   gpt-oss-120b    3.2s  工具 3/4      11 秒、2 次 shell、同樣跳過
 #
-# 兩個 gpt-oss 都只跑 lvr.py 就直接下結論：沒查同棟建案名與成交錨點、
-# 沒跑 listing.py 銷售中參照、沒問坪數歧義、沒比對各站坪數落差，
-# 然後拿「整區中位數」（AGENTS.md 明文標為不參與計算）乘坪數算出估價數字。
-# 120b 還自稱「符合 SOP 取最接近的數筆」，實際用的是全部 28 筆的中位數。
+# 兩個 gpt-oss 都只跑 lvr.py 就下結論：沒查同棟建案名與成交錨點、沒跑
+# listing.py、沒問坪數歧義、沒比對各站坪數落差，然後拿「整區中位數」
+# （AGENTS.md 明文標為不參與計算）乘坪數算出估價數字。120b 還自稱「符合
+# SOP 取最接近的數筆」，實際用的是全部 28 筆的中位數。
 #
-# 教訓：**單回合 benchmark 完全預測不了八回合的表現**。速度從不是瓶頸 ——
-# minimax 慢是慢，但它會照 SOP 一步步查；快 40 倍的代價是不做事。
-# 要再提速只能換方向（換成有帳號的 Claude Code、或縮短 AGENTS.md），不是換 NIM 模型。
+# 教訓：**單回合 benchmark 完全預測不了八回合的表現**。minimax 慢但會照
+# SOP 一步步查；快 40 倍的代價是不做事。瓶頸從來是規則遵守，不是速度。
+# kiro-cli 是 Claude 系＋OpenAB 官方預設後端，KIRO_SETUP.md 記載一次查證
+# 約 50–90 秒、0.05–0.2 AWS credits（估價一輪較重，抓 0.2–0.5）。
+# 要退回免費 NIM：command="qwen"、args=["--acp"]、env 加回 OPENAI_* 三件套
+# （OPENAI_MODEL 用 minimaxai/minimax-m3，那是唯一驗證過全部規則的 NIM 模型）。
 # 註：moonshotai/kimi-k2.6 仍列在 /v1/models 但實際呼叫回 404，不可用。
-#   GROQ_API_KEY — Discord 語音轉文字（[stt]）用。
-env = { OPENAI_API_KEY = "${NVIDIA_API_KEY}", OPENAI_BASE_URL = "https://integrate.api.nvidia.com/v1", OPENAI_MODEL = "minimaxai/minimax-m3", GROQ_API_KEY = "${GROQ_API_KEY}" }
 
 [pool]
 # 同 nvidia-lab：max_sessions=1 時主頻道與討論串會搶唯一槽位而靜默無回應。

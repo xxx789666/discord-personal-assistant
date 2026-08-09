@@ -26,21 +26,47 @@
   （plvr.land.moi.gov.tw/DownloadSeason，每季每縣市一 CSV，門牌未遮蔽、欄位齊全），
   純 HTTP、免瀏覽器、合規穩定。tools/lvr.py 下載→篩路名→剔特殊交易→算單價統計。
 
+## 後端：kiro-cli（2026-08-09 改，原為 qwen-code→NIM）
+
+換的理由是**規則遵守**不是速度。同一個估價標的實測：
+
+| 後端 | 整輪 | shell | 結果 |
+|---|---|---|---|
+| minimax-m3（NIM） | 7分10秒 | 9 | 11 條規則全過 |
+| gpt-oss-20b（NIM） | 11 秒 | 2 | 跳過大半 SOP、表格重複列、給出無依據數字 |
+| gpt-oss-120b（NIM） | 11 秒 | 2 | 同上 |
+| kiro-cli | 待測 | — | Claude 系＋OpenAB 官方預設後端 |
+
+兩個 gpt-oss 都只跑 `lvr.py` 就下結論，沒查同棟錨點、沒跑 `listing.py`。
+**單回合 benchmark 完全預測不了八回合的表現**（20b 在 benchmark 上是最快且
+工具呼叫 4/4，實測最糟）。詳見 `config-estate.toml` 的註解。
+
+`openab-kiro:tools` 這個 image 2026-08-09 加裝了 `uv`（EstateSpace 的工具全走
+`uv run`），所以 kiro 頻道與估價頻道共用同一個 image。
+
 ## 重建步驟（新機器 / down -v 後）
 
 ```bash
 cd "D:/discord 個人助理/openab"
-# 1. 建 + chown qwen volume（root-owned 會 EACCES，同 NVIDIA_SETUP 坑 2）
-docker volume create assistant_estate_qwen_state
-docker run --rm -v assistant_estate_qwen_state:/v alpine chown -R 1000:1000 /v
-# 2. 起容器
+# 1. 起容器（volume 由 compose 自建；image 內 /home/agent 已是 agent:agent，
+#    不需要像舊的 qwen volume 那樣先 chown）
 docker compose up -d openab-estate
-# 3. 灌繁中 output-language（坑 4；MSYS_NO_PATHCONV 避免 Git Bash 改路徑）
-docker cp ./qwen-output-language.md openab-estate:/home/node/.qwen/output-language.md
-MSYS_NO_PATHCONV=1 docker exec -u root openab-estate chown 1000:1000 /home/node/.qwen/output-language.md
-# 4. 驗證：log 應出現 discord bot connected user=Nvidia-bridge、channels=1
+
+# 2. AWS Builder ID 登入（**必做**，否則 agent 回 auth 錯誤）
+#    刻意不共用 kiro 頻道的 aiquant_kiro_auth：避免兩容器同時 refresh token
+#    的競態，也不加深對 AIQuant volume 的耦合。
+docker exec -it openab-estate kiro-cli login --use-device-flow
+#    依輸出開啟 URL、確認代碼、用 AWS Builder ID 登入，然後驗證：
+docker exec openab-estate kiro-cli whoami
+
+# 3. 驗證：log 應出現 discord bot connected user=Nvidia-bridge、channels=1
 docker logs openab-estate --tail 20
 ```
+
+**退回 NIM 後端**：`config-estate.toml` 改 `command="qwen"` / `args=["--acp"]`、
+env 加回 `OPENAI_*` 三件套（`OPENAI_MODEL = "minimaxai/minimax-m3"`），
+compose 改回 `image: openab-nvidia:qwen` 與 `assistant_estate_qwen_state`
+（那個 volume 沒刪，內容還在），並加回 `../.local/nvidia.env`。
 
 ## 冒煙測試
 
