@@ -20,6 +20,12 @@
 - `Notes/`、`Output/` — 長篇成果落地處（**bot 首次寫入時才建立**）
 - 旅遊查證成果不寫這裡，一律寫進 `TravelMemory/Trips/<slug>/research_notes.md`
 
+### URL 知識收件匣 — `URLIntake/`　#url-intake
+- [README.md](URLIntake/README.md) — 使用方式與資料夾說明
+- 直接貼 YouTube、X／Twitter 或任何文章網址；每個 URL 自動建立一份繁中
+  Markdown 重點整理
+- `URLIntake/PDF/` — 與筆記同名的 PDF，產生後也會自動回傳 Discord
+
 ### NVIDIA 實驗 — `LabSpace/`　#nvidia-lab
 - [AGENTS.md](LabSpace/AGENTS.md) — 角色規則
 - [WebAccess.md](LabSpace/WebAccess.md) — 上網 + YouTube 逐字稿 cookbook

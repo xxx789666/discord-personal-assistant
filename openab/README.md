@@ -1,6 +1,6 @@
 # openab — Discord 個人助理 stack 總覽
 
-> 最後更新：2026-07-23（新增 #聯徵報告製作 Codex 服務，預設 profile 關閉）。
+> 最後更新：2026-08-10（新增 #url-intake 網址知識擷取與 PDF 回傳）。
 > 本資料夾是整套系統的
 > 部署中心；compose 專案名 `discord-assistant`，與 D:\AIQuant 的 quant stack 完全分離。
 >
@@ -19,12 +19,13 @@ docker ps --filter "label=com.docker.compose.project=discord-assistant"
 docker logs openab-kiro --tail 30
 ```
 
-## 服務一覽（11 個 compose services）
+## 服務一覽（13 個 compose services）
 
 | 服務 | 角色 | 頻道/端口 | 詳細文件 |
 |---|---|---|---|
 | openab-kiro | Kiro CLI 通用助理＋旅遊查證主力＋YouTube 轉錄 | #kiro-assistant | KIRO_SETUP.md |
 | openab-nvidia-lab | qwen-code → NVIDIA NIM 免費模型（實驗） | #nvidia-lab | NVIDIA_SETUP.md |
+| openab-url-intake | 專用 listener：URL／YouTube／X 擷取 → NVIDIA NIM 整理 → Obsidian Markdown | #url-intake | URL_INTAKE_SETUP.md |
 | openab-travel-nvidia | 同上殼（旅遊查證副手） | #travel-planner | NVIDIA_SETUP.md |
 | openab-travel-claude | Claude Code 行程彙整（獨立 Pro 帳號） | #travel-planner | TRAVEL_SETUP.md |
 | openab-estate | 同 nvidia 殼（實價登錄比價估價；標示部使用者人工貼） | #不動產估價 | ESTATE_SETUP.md |
@@ -33,26 +34,29 @@ docker logs openab-kiro --tail 30
 | steel-api / steel-ui | 瀏覽器沙箱（讀網頁/截圖/登入態）＋live viewer | 127.0.0.1:3000/9223、5173 | STEEL_SETUP.md |
 | searxng | 搜尋 JSON API（自架 metasearch） | 127.0.0.1:8081 | STEEL_SETUP.md §5.5 |
 | pdf-publisher | 行程變動自動轉 PDF 發 Discord | （無端口） | 本檔 §pdf-publisher |
+| intake-publisher | URLIntake Markdown 自動轉 PDF 發 Discord | （無端口） | URL_INTAKE_SETUP.md |
 
 ## Discord 配置（伺服器「AA-agent」 1514818023737790614）
 
-**6 個頻道、7 個 bot 容器** —— 不是一對一。#travel-planner 由兩個容器共用，
+**7 個頻道、8 個 bot 容器** —— 不是一對一。#travel-planner 由兩個容器共用，
 所以「服務數」不等於「頻道數」。
 
 | 頻道 | ID | 容器 | Bot |
 |---|---|---|---|
 | #kiro-assistant | 1514819246838780095 | openab-kiro | kiro-bridge |
 | #nvidia-lab | 1514819234448933117 | openab-nvidia-lab | Nvidia-bridge |
+| #url-intake | 1536220007657373806 | openab-url-intake ＋ intake-publisher | Nvidia-bridge（專用 listener）＋確定性 PDF publisher |
 | #travel-planner | 1514819240631206072 | **openab-travel-nvidia ＋ openab-travel-claude** | Nvidia-bridge（查證，免費額度）＋ travel-claudebridge（行程彙整）—— 主頻道靠 @ 指定要哪一隻 |
 | #不動產估價 | 1517804694901362752 | openab-estate | Nvidia-bridge（2026-06-20 建）|
 | #a-struct | 1518874308716265643 | openab-astruct | openab-astruct |
 | #聯徵報告製作 | `${CREDIT_REPORT_CHANNEL_ID}` | openab-credit-report | 專用 Codex bot。**已上線**（2026-08-01 手機實測通過）；頻道 ID 不寫死在 config，由 `.local/` 經環境變數注入 |
 | #一般 | 1514818024467726471 | — | （無 bot 服務） |
 
-- **觸發規則**：頻道主訊息要 @（上游硬限制）；討論串內免 @；
+- **觸發規則**：一般助理頻道主訊息要 @、討論串內免 @；`#url-intake`
+  使用專用 Discord listener，直接貼 URL 即觸發；
   既有助理私訊免 @；**聯徵 bot 明確 `allow_dm = false`，只接受 bootstrap
   指定的單一頻道及其討論串**
-- **核心使用者白名單**（七份 config 都包含這兩人；a-struct 另有測試帳號）：
+- **核心使用者白名單**（八份 config 都包含這兩人；a-struct 另有測試帳號）：
   - `843428445802725388` anxxxiii（owner）
   - `1488170559865884684` qmini20
 - 新增成員：把 user ID 加進五份 config → `up -d --force-recreate` 各 bot 容器
@@ -65,6 +69,7 @@ docker logs openab-kiro --tail 30
 | credit_report.env | DISCORD_TOKEN_CREDIT_REPORT / CREDIT_REPORT_CHANNEL_ID |
 | nvidia.env | NVIDIA_API_KEY（build.nvidia.com 免費）|
 | groq.env | GROQ_API_KEY（語音 STT + yt.py Whisper 退路）|
+| cloudflare.env | CLOUDFLARE_ACCOUNT_ID / CLOUDFLARE_API_TOKEN（KiteSurf 遠端瀏覽器）|
 
 ## 帳號 / 額度來源（互不干擾）
 
@@ -87,6 +92,18 @@ DM travel-claudebridge「排行程」─▶ Trips/<slug>/itinerary.md
 
 Kiro 的「旅遊主題自動寫 vault」規則在 `KiroSpace/AGENTS.md` ＋
 `KiroSpace/.kiro/steering/travel/research-output.md`（雙保險）。
+
+## URL intake 工作流
+
+```
+#url-intake 貼 URL ─▶ KiteSurf 遠端擷取正文／YouTube 逐字稿
+                    └▶ URLIntake/YYYY-MM-DD_HHMM_<slug>.md（Obsidian）
+                         └─ intake-publisher（KiteSurf PDF；≤10 秒）
+                            ├▶ URLIntake/PDF/<同名>.pdf
+                            └▶ PDF 上傳回 #url-intake
+```
+
+規則、測試與維運見 [URL_INTAKE_SETUP.md](URL_INTAKE_SETUP.md)。
 
 ## pdf-publisher
 
@@ -126,7 +143,7 @@ Python 3、python-docx、pytest/jsonschema，並鎖定 Poppler、LibreOffice
 | 檔案 | 用途 |
 |---|---|
 | docker-compose.yml | stack 定義（服務、volume、port — 唯一真相來源）|
-| config-*.toml ×7 | 各 bot 的 OpenAB 設定（頻道、agent 指令、env、白名單）|
+| config-*.toml ×8 | 各 bot 的 OpenAB 設定（頻道、agent 指令、env、白名單）|
 | Dockerfile.kiro | kiro 衍生 image（+python3/ffmpeg/yt-dlp）|
 | Dockerfile.nvidia | nvidia 衍生 image（+qwen-code）|
 | Dockerfile.credit-report / credit-report/ | Codex bridge＋附件 intake/DOCX upload helper |
@@ -147,6 +164,7 @@ Python 3、python-docx、pytest/jsonschema，並鎖定 Poppler、LibreOffice
 | aiquant_*_qwen_state ×2 + assistant_estate_qwen_state | qwen 設定＋**強制繁中檔** | 重 chown 1000 + 重灌 output-language（NVIDIA_SETUP §4/§7、ESTATE_SETUP）|
 | aiquant_steel_cache | Steel Chrome cookies（登入態）| 各網站重登 |
 | assistant_pdfpub_state | 已發佈 PDF 的 hash | 會把現有行程重發一次（無害）|
+| assistant_urlintake_pdfpub_state | URL intake 已發佈 PDF hash | 會把現有 intake 筆記重發一次（無害）|
 
 ## Image 與 openab 版本對照（查證於 2026-08-01）
 

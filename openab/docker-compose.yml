@@ -4,6 +4,7 @@
 # 服務：
 #   openab-kiro          #kiro-assistant（Kiro CLI，通用助理＋旅遊查證主力）
 #   openab-nvidia-lab    #nvidia-lab（qwen-code → NVIDIA NIM，實驗/免費勞力）
+#   openab-url-intake    #url-intake（網址／影片 → Obsidian Markdown）
 #   openab-travel-nvidia #travel-planner 查證副手（同上殼）
 #   openab-travel-claude #travel-planner 行程彙整（Claude Max OAuth）
 #   openab-credit-report #聯徵報告製作（Codex CLI；PDF/圖片進、DOCX 回傳）
@@ -65,6 +66,41 @@ services:
       # 新 volume 要 chown 1000:1000 — NVIDIA_SETUP §4）。
       - aiquant_nvidialab_qwen_state:/home/node/.qwen
       - ./config-nvidia-lab.toml:/etc/openab/config.toml:ro
+
+  # ─────────────────────────────────────────────────────────────────────────
+  # #url-intake — 每則 URL 自動擷取與整理。專用 py-cord listener 直接監聽
+  # 頻道（無需 @）；擷取沿用 quant-intake 的字幕優先、yt-dlp+Whisper 退路，
+  # 一般網頁走 Steel/Jina，再由 NVIDIA NIM 整理。Markdown 寫入 Obsidian
+  # vault 的 URLIntake/，PDF 由下方 intake-publisher 確定性回傳。
+  openab-url-intake:
+    image: assistant-url-intake:dev
+    build:
+      context: ./url-intake
+      dockerfile: Dockerfile
+    container_name: openab-url-intake
+    restart: unless-stopped
+    env_file:
+      - ../.local/discord_token.env
+      - ../.local/nvidia.env
+      - ../.local/groq.env
+      - ../.local/cloudflare.env
+    environment:
+      CHANNEL_ID: "1536220007657373806"
+      ALLOWED_USERS: "843428445802725388,1488170559865884684"
+      VAULT: "/vault"
+      STEEL: "http://steel-api:3000"
+      NVIDIA_MODEL: "minimaxai/minimax-m3"
+      NVIDIA_FALLBACK_MODEL: "nvidia/nemotron-3-nano-30b-a3b"
+      NVIDIA_FINAL_FALLBACK_MODEL: "nvidia/nemotron-3-super-120b-a12b"
+      NVIDIA_PRIMARY_TIMEOUT: "120"
+      NVIDIA_FALLBACK_TIMEOUT: "180"
+      NVIDIA_FINAL_FALLBACK_TIMEOUT: "120"
+      # Kitesurf/Jina only by default; local Steel is not used for webpage intake.
+      ALLOW_STEEL_FALLBACK: "false"
+    volumes:
+      - "D:/discord 個人助理/URLIntake:/vault"
+    depends_on:
+      - searxng
 
   openab-travel-nvidia:
     image: openab-nvidia:qwen
@@ -255,6 +291,36 @@ services:
     depends_on:
       - steel-api
 
+  # #url-intake Markdown → PDF。使用同一個 renderer image，但各自的 glob、
+  # token、頻道與 state 完全分離；PDF 同時存入 Obsidian 的 URLIntake/PDF/。
+  intake-publisher:
+    image: assistant-pdf-publisher:dev
+    build:
+      context: ./pdf-publisher
+      dockerfile: Dockerfile
+    container_name: intake-publisher
+    restart: unless-stopped
+    env_file:
+      - ../.local/discord_token.env
+      - ../.local/cloudflare.env
+    environment:
+      CHANNEL_ID: "1536220007657373806"
+      DISCORD_TOKEN_VAR: "DISCORD_TOKEN_NVIDIA"
+      FILE_GLOB: "20??-??-??_????_*.md"
+      PDF_SUBDIR: "PDF"
+      PDF_FILENAME_TEMPLATE: "{stem}.pdf"
+      DISCORD_FILENAME_TEMPLATE: "{stem}.pdf"
+      MESSAGE_TEMPLATE: "📄 **{title}**（自動整理 PDF）"
+      SELF_URL: "http://intake-publisher:8000"
+      POLL_SECONDS: "10"
+      RENDER_VERSION: "url-intake-a4-v1"
+      ALLOW_STEEL_PDF_FALLBACK: "true"
+    volumes:
+      - "D:/discord 個人助理/URLIntake:/vault"
+      - assistant_urlintake_pdfpub_state:/state
+    depends_on:
+      - steel-api
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Named volumes — 全部沿用既有 volume（external），名稱含 aiquant_ 為歷史包袱。
 # 新機器重建：docker volume create <name> 之後照各 SETUP 文件 bootstrap。
@@ -262,6 +328,9 @@ volumes:
   # pdf-publisher 的已發佈狀態（非 external — compose 自建，root 行程可寫）。
   assistant_pdfpub_state:
     name: assistant_pdfpub_state
+  # URL intake 的 PDF 發佈 hash。
+  assistant_urlintake_pdfpub_state:
+    name: assistant_urlintake_pdfpub_state
   # A_struct 審核 bot 的獨立 Claude Pro state（非 external，compose 自建；首次 /login）。
   assistant_astruct_state:
     name: assistant_astruct_state
