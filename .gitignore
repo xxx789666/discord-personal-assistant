@@ -16,6 +16,17 @@
 node_modules/
 EstateSpace/tools/.lvr_cache/
 
+# URL intake 的產出（抓取的筆記與自動轉的 PDF）—— 只有 AGENTS/README/
+# WebAccess 這三份說明文件進版控，內容不進（8MB+ 且會持續增長）。
+URLIntake/*.md
+!URLIntake/AGENTS.md
+!URLIntake/README.md
+!URLIntake/WebAccess.md
+URLIntake/PDF/
+
+# 中間產物（pdf 轉圖的頁面暫存等）
+tmp/
+
 # Generated and temporary files
 *.tmp
 *.log
