@@ -47,6 +47,10 @@ session_ttl_hours = 2
 [reactions]
 enabled = true
 remove_after_reply = false
+# 工具呼叫顯示（docs/tool-display.md，0.8.4 起支援）：full | compact | none
+# full 會把每一行工具呼叫都貼進 Discord，回覆看起來很雜；compact 只留
+# 一行計數，仍看得出 agent 有在動。2026-08-23 五隻 bot 一起改齊。
+tool_display = "compact"
 
 # 語音訊息轉文字 — 同 config-claude.toml 的 Groq whisper 設定。
 # GROQ_API_KEY 來自 ../.local/agent_token.env（QUANTDINGER_* 不會進

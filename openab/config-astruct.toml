@@ -23,6 +23,24 @@ args = []
 # data/forward（queue/decisions 在此）。角色見 AGENTS.md。
 working_dir = "/workspace/AStructSpace"
 
+# ── 長效訂閱 token（2026-08-23 啟用）─────────────────────
+# 現行做法是容器內 `claude /login` 把短命憑證寫進 .credentials.json。上游
+# docs/claude-code.md 明講「For container deployments, the long-lived token
+# is preferred」：session login 的 refresh token 會輪替，拿被輪替掉的那顆去
+# refresh，Claude Code 會**把憑證檔清空**，bot 就此鎖死等人工重登。
+# 2026-06-12（travel-claude）與 2026-08-21（astruct）各中一次。
+#
+# 啟用步驟：
+#   1. docker exec -it openab-astruct claude setup-token
+#   2. 把印出的 sk-ant-oat... 貼進 ../.local/claude_oauth.env 的 CLAUDE_CODE_OAUTH_TOKEN_ASTRUCT
+#      （左邊的 key 固定叫 CLAUDE_CODE_OAUTH_TOKEN — Claude Code 只認這個名字；
+#        右邊的 _TRAVEL/_ASTRUCT 後綴只是 host 端用來區分兩個帳號。）
+#   3. 取消下面這行的註解
+#   4. docker compose up -d openab-astruct
+#
+# ⚠ 這不是 ANTHROPIC_API_KEY（那條鐵律照舊：絕不設）。長效 token 走訂閱計費。
+env = { CLAUDE_CODE_OAUTH_TOKEN = "${CLAUDE_CODE_OAUTH_TOKEN_ASTRUCT}" }
+
 [pool]
 max_sessions = 1
 session_ttl_hours = 2
@@ -30,6 +48,10 @@ session_ttl_hours = 2
 [reactions]
 enabled = true
 remove_after_reply = false
+# 工具呼叫顯示（docs/tool-display.md，0.8.4 起支援）：full | compact | none
+# full 會把每一行工具呼叫都貼進 Discord，回覆看起來很雜；compact 只留
+# 一行計數，仍看得出 agent 有在動。2026-08-23 五隻 bot 一起改齊。
+tool_display = "compact"
 
 [stt]
 enabled = true

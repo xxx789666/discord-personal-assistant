@@ -40,7 +40,19 @@ Discord #travel-planner（1514819240631206072）＋ 私訊（免 @）
   docker compose -f "D:\discord 個人助理\openab\docker-compose.yml" restart openab-travel-claude
   ```
 - ⚠ **絕不設 ANTHROPIC_API_KEY**（Claude Code 會棄 OAuth 改走 API 計費）。
-- token 自動 refresh，登一次即可。
+- ✅ **2026-08-23 起改用長效訂閱 token**，下面這段 session-login 的問題已不適用
+  （保留作為背景說明與退路）。切換細節見 `healthcheck/README.md`。
+- ⚠ token **不保證**自動 refresh。2026-08-23 實測：access token 在 2026-06-12
+  到期後兩個多月都沒被換過（`.credentials.json` mtime 停在發卡當天），
+  Discord 端表現為 `⚠️ Internal Error (code: -32603)` + `API Error: 401
+  OAuth access token has expired`。診斷指令：
+  ```powershell
+  docker exec openab-travel-claude claude -p "say ok"   # 直接看 CLI 是否也 401
+  ```
+- ⚠ **在容器裡 /login 完不會立刻生效**：bridge 的 `claude-agent-acp` 子行程只在
+  spawn 時讀一次憑證（`[pool] session_ttl_hours = 2`），舊 session 會繼續拿過期
+  token 撞 401。一定要 restart 容器才會吃到新 token。
+- 每小時有自動健康檢查在監看這件事（2026-08-23 起）：`healthcheck/README.md`。
 
 ## 雙 bot 接力（可選，未啟用）
 

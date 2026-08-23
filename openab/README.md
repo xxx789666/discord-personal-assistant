@@ -143,13 +143,14 @@ Python 3、python-docx、pytest/jsonschema，並鎖定 Poppler、LibreOffice
 | 檔案 | 用途 |
 |---|---|
 | docker-compose.yml | stack 定義（服務、volume、port — 唯一真相來源）|
-| config-*.toml ×8 | 各 bot 的 OpenAB 設定（頻道、agent 指令、env、白名單）|
+| config-*.toml ×7 | 各 bot 的 OpenAB 設定（頻道、agent 指令、env、白名單）|
 | Dockerfile.kiro | kiro 衍生 image（+python3/ffmpeg/yt-dlp）|
 | Dockerfile.nvidia | nvidia 衍生 image（+qwen-code）|
 | Dockerfile.credit-report / credit-report/ | Codex bridge＋附件 intake/DOCX upload helper |
 | qwen-output-language.md | qwen 強制繁中範本（灌進 qwen volumes 用）|
 | searxng-settings.yml | SearXNG 設定（formats 加了 json）|
 | pdf-publisher/ | 自動 PDF 服務（Dockerfile + publish.py）|
+| healthcheck/ | Claude OAuth 憑證監看（Windows 排程，容器外跑）— 見 healthcheck/README.md |
 | *_SETUP.md ×6 | 各子系統的現況、重建步驟、踩坑紀錄（含 CREDIT_REPORT_SETUP.md）|
 | MAIL_CLEANUP_FRAMEWORK.md | 信箱清理框架（**規劃中**）：三層分工，Layer 3 等 OpenAB 0.10.0-beta.3 |
 

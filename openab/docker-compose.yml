@@ -155,6 +155,9 @@ services:
     env_file:
       - ../.local/discord_token.env
       - ../.local/groq.env
+      # 長效訂閱 token（2026-08-23）。目前檔內是佔位字串，等 setup-token
+      # 產生後才會生效；掛著不影響現行的 .credentials.json 流程。
+      - ../.local/claude_oauth.env
     volumes:
       - "D:/discord 個人助理/TravelMemory:/workspace/TravelMemory"
       # 專屬 Claude 帳號 state（rw — OAuth token 要能自動 refresh）。
@@ -179,6 +182,8 @@ services:
     env_file:
       - ../.local/discord_token.env
       - ../.local/groq.env
+      # 長效訂閱 token — 見 openab-travel-claude 同段註解。
+      - ../.local/claude_oauth.env
     volumes:
       - "D:/discord 個人助理/AStructSpace:/workspace/AStructSpace"
       - "C:/Users/xx/Desktop/tmf-strategy-lab-main/tmf-strategy-lab-main/data/forward:/workspace/AStructSpace/forward"
