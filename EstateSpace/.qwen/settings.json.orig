@@ -1,7 +1,10 @@
 {
   "permissions": {
     "allow": [
-      "Bash(uv *)"
+      "Bash(uv *)",
+      "Bash(tee *)",
+      "Bash(grep *)",
+      "Bash(do *)"
     ]
   },
   "$version": 4

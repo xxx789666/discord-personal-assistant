@@ -7,6 +7,7 @@ import process from "node:process";
 import {
   cleanupIntake,
   downloadAttachments,
+  notifyUser,
   uploadDocx,
 } from "./discord-files.mjs";
 
@@ -81,6 +82,9 @@ async function dispatch(request) {
   }
   if (request.command === "upload") {
     return await uploadDocx(request.options || {});
+  }
+  if (request.command === "notify") {
+    return await notifyUser(request.options || {});
   }
   if (request.command === "clean") {
     return await cleanupIntake(request.options || {});

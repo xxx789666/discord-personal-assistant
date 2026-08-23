@@ -119,6 +119,7 @@ test(
     const pdf = minimalPdf();
 
     let apiBase = "";
+    const observedNotifications = [];
     const server = http.createServer((request, response) => {
       if (
         request.url ===
@@ -146,6 +147,22 @@ test(
         response.end(pdf);
         return;
       }
+      if (
+        request.method === "POST" &&
+        request.url === `/api/channels/${channelId}/messages`
+      ) {
+        assert.equal(request.headers.authorization, "Bot offline-test-token");
+        const chunks = [];
+        request.on("data", (chunk) => chunks.push(chunk));
+        request.on("end", () => {
+          observedNotifications.push(
+            JSON.parse(Buffer.concat(chunks).toString("utf8")),
+          );
+          response.setHeader("content-type", "application/json");
+          response.end(JSON.stringify({ id: siblingMessageId }));
+        });
+        return;
+      }
       response.statusCode = 404;
       response.end();
     });
@@ -162,6 +179,8 @@ test(
       CREDIT_REPORT_INTAKE_ROOT: intake,
       CREDIT_REPORT_BROKER_SOCKET: socketPath,
     };
+    const agentEnvironment = { ...environment };
+    delete agentEnvironment.DISCORD_TOKEN_CREDIT_REPORT;
     const broker = spawn(process.execPath, [brokerPath], {
       env: environment,
       stdio: ["ignore", "pipe", "pipe"],
@@ -195,10 +214,35 @@ test(
         "--dest",
         intake,
       ],
-      environment,
+      agentEnvironment,
     );
     assert.match(downloadResult.stdout, /credit-report\.discord-intake\.v1/);
     assert.equal(broker.exitCode, null, brokerStderr);
+
+    const notifyResult = await runAsAgent(
+      process.execPath,
+      [
+        helperPath,
+        "notify",
+        "--channel-id",
+        channelId,
+        "--reply-to",
+        messageId,
+        "--content",
+        "⏳ 已開始處理｜已收到附件；你目前不需操作。",
+      ],
+      agentEnvironment,
+    );
+    assert.match(notifyResult.stdout, /"notified": true/);
+    assert.equal(observedNotifications.length, 1);
+    assert.equal(
+      observedNotifications[0].content,
+      "⏳ 已開始處理｜已收到附件；你目前不需操作。",
+    );
+    assert.equal(
+      observedNotifications[0].message_reference.message_id,
+      messageId,
+    );
 
     const messageDirectory = path.join(intake, messageId);
     const pdfPath = path.join(messageDirectory, "01-offline-test.pdf");
@@ -231,7 +275,7 @@ test(
         pdfPath,
         renderPrefix,
       ],
-      environment,
+      agentEnvironment,
     );
     await fs.rm(`${renderPrefix}.png`, { force: true });
 
@@ -253,7 +297,7 @@ test(
         "--dest",
         intake,
       ],
-      environment,
+      agentEnvironment,
     );
     await assert.rejects(fs.access(messageDirectory));
     await fs.access(path.join(siblingDirectory, "keep.txt"));

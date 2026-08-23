@@ -9,6 +9,7 @@ import { deflateRawSync } from "node:zlib";
 import {
   cleanupIntake,
   downloadAttachments,
+  notifyUser,
   uploadDocx,
 } from "./discord-files.mjs";
 
@@ -276,6 +277,53 @@ test("uploads only a DOCX below the configured workspace", async () => {
   assert.equal(observedAuthorization, "Bot offline-test-token");
   assert.match(observedBody, /completed-report\.docx/);
   assert.match(observedBody, /22345678901234567/);
+});
+
+test("sends a bounded user-facing notification without allowed mentions", async () => {
+  let observedAuthorization = "";
+  let observedPayload = null;
+  const baseUrl = await listen((request, response) => {
+    observedAuthorization = String(request.headers.authorization || "");
+    const chunks = [];
+    request.on("data", (chunk) => chunks.push(chunk));
+    request.on("end", () => {
+      observedPayload = JSON.parse(Buffer.concat(chunks).toString("utf8"));
+      response.setHeader("content-type", "application/json");
+      response.end(JSON.stringify({ id: "32345678901234567" }));
+    });
+  });
+
+  process.env.DISCORD_TOKEN_CREDIT_REPORT = "offline-test-token";
+  process.env.DISCORD_API_BASE = `${baseUrl}/api`;
+  process.env.CREDIT_REPORT_CHANNEL_ID = "12345678901234567";
+
+  const result = await notifyUser({
+    channelId: "12345678901234567",
+    replyTo: "22345678901234567",
+    content: "⏳ 已收到補件｜正在確認檔案內容；你目前不需操作。",
+  });
+
+  assert.equal(result.notified, true);
+  assert.equal(observedAuthorization, "Bot offline-test-token");
+  assert.equal(observedPayload.content, "⏳ 已收到補件｜正在確認檔案內容；你目前不需操作。");
+  assert.deepEqual(observedPayload.allowed_mentions, {
+    parse: [],
+    replied_user: false,
+  });
+  assert.equal(observedPayload.message_reference.message_id, "22345678901234567");
+});
+
+test("rejects empty or oversized user-facing notifications", async () => {
+  process.env.CREDIT_REPORT_CHANNEL_ID = "12345678901234567";
+
+  await assert.rejects(
+    notifyUser({ channelId: "12345678901234567", content: "   " }),
+    /must not be empty/,
+  );
+  await assert.rejects(
+    notifyUser({ channelId: "12345678901234567", content: "x".repeat(1901) }),
+    /exceeds 1900 characters/,
+  );
 });
 
 test("rejects a DOCX path outside the configured workspace", async () => {

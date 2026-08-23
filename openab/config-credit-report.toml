@@ -36,3 +36,6 @@ session_ttl_hours = 4
 [reactions]
 enabled = true
 remove_after_reply = false
+# Internal command lines obscure the report status on mobile. User-facing
+# milestones are sent explicitly through the narrow Discord notify helper.
+tool_display = "none"

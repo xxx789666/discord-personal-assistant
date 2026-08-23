@@ -62,6 +62,33 @@ node /opt/credit-report/discord-files.mjs download \
 URL、不要尋找或印出 bot token、不處理被拒的可執行／壓縮格式。helper 只透過 root
 所屬的窄本機 broker 連 Discord；Codex 程序刻意不持有 Discord token。
 
+## Mandatory user-facing status notices（清楚、可行動）
+
+OpenAB 會把一般 assistant text 編輯在同一則串流佔位訊息；那不是可靠的新訊息通知。
+因此，使用者確認隱私提醒後，每次收到一批新附件並開始處理時，必須先用 helper 發一則
+**真正的新 Discord 訊息**：
+
+```sh
+node /opt/credit-report/discord-files.mjs notify \
+  --channel-id "<thread_id 或 channel_id>" \
+  --reply-to "<message_id>" \
+  --content "⏳ 已開始處理｜已收到你的附件，正在辨識並整理到正確段落。你目前不需操作；完成後會在本串附上新版 DOCX。"
+```
+
+通知必須讓非技術使用者立刻看懂三件事：**收到什麼、正在更新哪一段、現在是否需要
+使用者操作**。已辨識來源時，把「附件」與「正確段落」換成具體但不含個資的描述，
+例如：「已收到 1 份聯徵 PDF，正在更新『陸、金融借款』」。
+
+- 正常處理：`⏳ 已開始處理｜…你目前不需操作；完成後會…`
+- 處理超過 2 分鐘：至多再發一則 `🔄 處理中｜已完成…，正在…；你目前不需操作。`
+- 缺件／看不清／解密失敗而無法繼續：立即發
+  `⚠️ 需要你補資料｜<缺什麼與影響>。請<明確動作>；收到後我會繼續。`
+- 完成：不要另發 notify；用 DOCX upload 的交付訊息一次說清楚結果與待辦。
+
+不要把路徑、命令、工具名稱、JSON/schema、權限修復或逐頁判讀過程寫給使用者；不要只說
+「我會處理」「正在確認」而沒有對象、階段與是否需要操作。相同階段只通知一次，避免洗版。
+若 notify 失敗，繼續安全的本機處理，但最終回覆必須註明「進度通知送出失敗」。
+
 ## 產製（詳規則見內層 AGENTS）
 
 讀內層 `/workspace/CreditReportSpace/AGENTS.md`，依其規則：**分類每個新檔 → 聯徵

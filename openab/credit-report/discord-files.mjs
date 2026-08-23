@@ -4,7 +4,8 @@
  *
  * OpenAB supplies sender_context (channel/thread/message IDs), while this helper
  * uses the bot token to fetch the original message and persist only approved
- * report inputs. It also uploads the final DOCX back to the originating channel.
+ * report inputs. It also sends narrow user-facing progress notices and uploads
+ * the final DOCX back to the originating channel.
  */
 import { createHash, randomUUID } from "node:crypto";
 import { promises as fs } from "node:fs";
@@ -19,6 +20,7 @@ const DEFAULT_WORKSPACE = "/workspace/CreditReportSpace";
 const DEFAULT_MAX_FILE_BYTES = 25 * 1024 * 1024;
 const DEFAULT_MAX_TOTAL_BYTES = 100 * 1024 * 1024;
 const DEFAULT_MAX_FILES = 20;
+const MAX_NOTIFICATION_CHARS = 1900;
 
 const ALLOWED_EXTENSIONS = new Set([
   ".pdf",
@@ -627,6 +629,41 @@ export async function uploadDocx({
   };
 }
 
+export async function notifyUser({ channelId, content, replyTo }) {
+  validateSnowflake(channelId, "channel ID");
+  if (replyTo) validateSnowflake(replyTo, "reply-to message ID");
+  await assertAllowedChannel(channelId);
+
+  const message = String(content || "").trim();
+  if (!message) fail("notification content must not be empty");
+  if ([...message].length > MAX_NOTIFICATION_CHARS) {
+    fail(`notification content exceeds ${MAX_NOTIFICATION_CHARS} characters`);
+  }
+
+  const payload = {
+    content: message,
+    allowed_mentions: { parse: [], replied_user: false },
+  };
+  if (replyTo) {
+    payload.message_reference = {
+      message_id: replyTo,
+      channel_id: channelId,
+      fail_if_not_exists: false,
+    };
+  }
+  const response = await discordFetch(`${apiBase()}/channels/${channelId}/messages`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+  const result = await response.json();
+  return {
+    notified: true,
+    channel_id: channelId,
+    message_id: String(result.id || ""),
+  };
+}
+
 export async function brokerRequest(command, options) {
   const socketPath = process.env.CREDIT_REPORT_BROKER_SOCKET;
   if (!socketPath) fail("CREDIT_REPORT_BROKER_SOCKET is not configured");
@@ -686,6 +723,7 @@ function usage() {
   return `Usage:
   discord-files.mjs download --channel-id ID --message-id ID --dest DIR
     (--message-id latest = 抓該頻道/討論串最新一則由真人發、含附件的訊息)
+  discord-files.mjs notify --channel-id ID --content TEXT [--reply-to ID]
   discord-files.mjs upload --channel-id ID --file PATH [--reply-to ID] [--content TEXT]
   discord-files.mjs clean --message-id ID [--dest DIR]
 
@@ -732,6 +770,18 @@ async function main() {
     const result = useBroker
       ? await brokerRequest("upload", request)
       : await uploadDocx(request);
+    process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
+    return;
+  }
+  if (command === "notify") {
+    const request = {
+      channelId: options["channel-id"],
+      replyTo: options["reply-to"],
+      content: options.content,
+    };
+    const result = useBroker
+      ? await brokerRequest("notify", request)
+      : await notifyUser(request);
     process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
     return;
   }
