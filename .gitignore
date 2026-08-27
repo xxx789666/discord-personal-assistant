@@ -1,5 +1,6 @@
-# Local secrets and credentials
-.local/
+# Local secrets and credentials（範本進版控，實檔不進）
+.local/*
+!.local/*.example
 估價頻道.txt
 
 # Sensitive source documents supplied as report references

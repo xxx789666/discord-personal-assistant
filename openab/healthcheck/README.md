@@ -153,3 +153,120 @@ access token 過期是它的常態）。
 4. **config.toml 裡 env 的 key 必須是 `CLAUDE_CODE_OAUTH_TOKEN`**（Claude Code 只認
    這個固定名字）。`_TRAVEL` / `_ASTRUCT` 後綴只在 host 端用來區分兩個帳號，
    所以是映射：`env = { CLAUDE_CODE_OAUTH_TOKEN = "${CLAUDE_CODE_OAUTH_TOKEN_TRAVEL}" }`。
+
+---
+
+# 掛載守護（mount-watchdog，2026-08-27）
+
+## 為什麼有這東西
+
+2026-08-27 Docker Desktop 的 WSL2 utility VM 崩潰，C:／D:／E: 三個磁碟的 9p
+同時斷掉。容器內 `ls /vault` 變成 `Input/output error`，但 `docker ps` 仍顯示
+`healthy`——因為 image 內建 healthcheck 是 `pgrep -x openab`，只驗程序活著、
+完全不碰檔案系統。故障藏了約 9 小時。
+
+完整事故與規格：`docs/mount_watchdog_spec_2026_08_27.md`。
+
+## 三層防線
+
+| 層 | 做什麼 | 檔案 |
+|---|---|---|
+| 1 | compose 覆寫 healthcheck：程序活著 **且** `ls` 掛載點本身 | `openab/docker-compose.yml` |
+| 2 | 每 5 分鐘兩段式探測 + Discord 告警（去重） | `mount-watchdog.ps1` |
+| 3 | 只有 `Scope=vm` 才走自癒階梯；24h 最多 2 次 | 同上 |
+
+⚠ **Tier 1 絕對不可只 `ls` 父目錄。** 掛載點的目錄項在容器本地檔案系統一定存在，
+`ls /workspace` 在 9p 已死時仍會成功。必須 `ls /workspace/EstateSpace` 這種掛載點本身。
+
+## 用法
+
+```powershell
+cd openab\healthcheck
+.\mount-watchdog.ps1 -SelfTest   # 純函式：狀態機 / 去重 / 熔斷器 / Tier 2 判讀
+.\mount-watchdog.ps1 -DryRun     # 真的探測；只印出自癒步驟，不殺行程、不發 Discord
+.\mount-watchdog.ps1             # 正式跑。狀態未翻轉就不發 Discord
+.\mount-watchdog.ps1 -TestAlert # 只發一則測試 Discord，不動狀態檔
+.\register-mount-watchdog.ps1 -WhatIf
+.\register-mount-watchdog.ps1    # 註冊 OpenAB-MountWatchdog（每 5 分鐘）
+```
+
+排程是 `LogonType Interactive`——只在使用者登入時跑。Docker Desktop 本來就
+需要使用者 session。
+
+## 告警設定
+
+複製 `.local/infra_alert.env.example` → `.local/infra_alert.env`（gitignore），
+填入頻道 snowflake。Token 從 `.local/discord_token.env` 用
+`INFRA_ALERT_TOKEN_VAR`（預設 `DISCORD_TOKEN_NVIDIA`）取出。
+
+設定搜尋順序（`-TestAlert` 與正式執行**同一條**；沒有 TestAlert 專屬捷徑）：
+1. `-AlertEnv` / `-TokenEnv` 若有給就用
+2. 此 repo 的 `.local\infra_alert.env` + 同目錄 `discord_token.env`
+3. `D:\discord 個人助理\.local\` 下同名檔（主 checkout）
+
+`INFRA_ALERT_CHANNEL_ID` 未設定或仍是 placeholder 時，腳本**照常跑完偵測、寫
+log**，只跳過 Discord，並記 `[SKIP] no alert channel configured (not stamping lastAlertAt)`。
+**只有 Discord HTTP 2xx 才更新** `lastAlertAt` / `lastResidentAlertAt` / `lastAllDownAlertAt`；
+送失敗會累計 `discordFailCount` 並本輪非零退出。**健康輪（本輪沒有送出失敗）會把計數歸零**，
+exit code 只表示本輪異常，不是歷史上曾經失敗過。所有 Discord（含自癒中途）只走
+`Send-WatchdogNotice`（內部記帳）。自癒／重啟是否「修好了」只走 `Get-InterventionOutcome`。
+
+Discord REST **一定要帶** `User-Agent: DiscordBot (...)`，否則 Cloudflare 回
+空 body 403。函式沿用 `claude-oauth-check.ps1` 的寫法。
+
+去重：OK→FAIL 發一次；持續 FAIL 每 60 分鐘再發；FAIL→OK 發一次「已恢復」。
+狀態在 `.state/mount-watchdog.json`（此目錄已 gitignore）。
+
+## 自癒（第三層）——已知代價
+
+**只有 Tier 2 看到 `/run/desktop/mnt/host/` 出現 `d?????????`（Scope=vm）才啟動。**
+
+- `Scope=container` → 只 `docker restart` **掛載讀不到且仍在跑**的容器，然後重驗；修好會再發一則「已由重啟容器修復」
+- `Scope=daemon` → 第一次只記 log（寬限一個 tick），連續兩次才當 FAIL 告警，避免正常開關機洗版
+- 容器 `stopped` / `absent`：profile（`Optional=true`，如 credit-report）完全靜音；**常駐**容器停超過 30 分鐘發一則 ℹ️（不 @、不 restart、不自癒），60 分鐘節流
+- **Docker 全死**（12 筆都 SKIP、0 筆 probed）→ 不算 OK：跑 Tier 2、不清 latch、不發假「已恢復」。Tier2 `scope=daemon` 走寬限；`scope=vm` 才自癒
+- **全部容器不存在但 daemon/9p 健康**（compose down）→ `all-down`：連續 2 個 tick 才發 ℹ️「N 條全部無法探測（容器皆不存在）」，不 @、不進 FAIL、不重啟
+
+階梯：告警 → `wsl --shutdown`（**不等待指令返回**，改輪詢 `vmmemWSL`／`vmmem` 消失，上限
+900s——規格 §6.5 實測超過 10 分鐘）→ 殺掉 `Docker Desktop` / `com.docker.backend` /
+`com.docker.build` → 啟動 `Docker Desktop.exe` → 輪詢 `alpine ls /vault` 上限 600s →
+重跑 Tier 1（判定與通知交還主流程的 `Get-InterventionOutcome`，階梯不再自己宣判成功）。
+
+自癒 abort 後寫入 `manualRequired` 閂鎖，**下一個 tick 不會再打** `wsl --shutdown`。
+24 小時後閂鎖過期；**只有真正探測到掛載 OK**（probed>0）才清閂鎖。另外 60 分鐘最小間隔擋連打。
+
+排程 5 分鐘不是 3 分鐘：Tier 1 最壞 12×15s=180s，3 分鐘 interval 會讓卡住時取樣率砍半。
+
+⚠ **不可用 `docker desktop restart`。** 事故當下 Docker Desktop 彈了 modal
+對話框等人工點擊，CLI 只會說 already running。必須先殺行程再開新的。
+這個規避手法**未經實地驗證**；若對話框仍然出現，會在第 6 步超時後**乾淨退回
+告警、不再重試**。
+
+⚠ **`wsl --shutdown` 會長時間沒輸出。** 看起來像卡死，其實在作用。distro 會先
+停，`vmmemWSL` 還要更久才消失。900 秒仍超時就停手、上閂鎖，發「需要人工處理／重開機」。
+
+⚠ **自癒會殺掉 Ubuntu distro 與所有容器。** 這是已知且已被接受的代價：9p 崩了
+本來也沒人能用那些容器。24 小時內最多自癒 2 次，超過只告警「已達自癒上限，
+需要人工介入」。
+
+## python slim 容器的程序檢查
+
+`openab-url-intake` / `intake-publisher` / `pdf-publisher` 是 `python:3.12-slim`，
+**沒有 pgrep**。2026-08-27 `docker top` 實測 PID 1：
+
+| 容器 | PID 1 |
+|---|---|
+| `openab-url-intake` | `python -u /app/bot.py` |
+| `intake-publisher` | `python -u /app/publish.py` |
+| `pdf-publisher` | `python -u /app/publish.py` |
+
+healthcheck 用 `grep -qa '/app/bot.py' /proc/1/cmdline`（或 publish.py）加上
+`ls /vault`，不是假設程序名叫 `openab`。
+
+## 實作時又踩到的 PS 5.1 坑
+
+`Write-Output` 不能用在「會被 `$x = Invoke-Fn` 接回傳值」的函式裡。成功流的字串
+會跟回傳物件混在一起，字串沒有 `.Verdict`，舊碼若寫 `-not $r.Ok` 會把 12 條
+當成全掛（第一次 `-DryRun` 就是這樣炸的）。`Write-Log` 改走 `Write-Host` +
+`.state` log 檔。結果物件**只有 `Verdict`**，沒有 `Ok` 欄位。
+

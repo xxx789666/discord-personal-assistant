@@ -45,6 +45,12 @@ services:
       - aiquant_kiro_state:/home/agent/.kiro
       - aiquant_kiro_auth:/home/agent/.local/share/kiro-cli
       - ./config-kiro.toml:/etc/openab/config.toml:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pgrep -x openab >/dev/null && ls /workspace/KiroSpace >/dev/null 2>&1 && ls /workspace/TravelMemory >/dev/null 2>&1 || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
 
   # ─────────────────────────────────────────────────────────────────────────
   # #nvidia-lab — qwen-code 殼 → NVIDIA NIM 免費模型。設定手冊 NVIDIA_SETUP.md。
@@ -66,6 +72,12 @@ services:
       # 新 volume 要 chown 1000:1000 — NVIDIA_SETUP §4）。
       - aiquant_nvidialab_qwen_state:/home/node/.qwen
       - ./config-nvidia-lab.toml:/etc/openab/config.toml:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pgrep -x openab >/dev/null && ls /workspace/LabSpace >/dev/null 2>&1 || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
 
   # ─────────────────────────────────────────────────────────────────────────
   # #url-intake — 每則 URL 自動擷取與整理。專用 py-cord listener 直接監聽
@@ -101,6 +113,14 @@ services:
       - "D:/discord 個人助理/URLIntake:/vault"
     depends_on:
       - searxng
+    # python:3.12-slim 沒有 pgrep；2026-08-27 docker top / /proc/1/cmdline
+    # 實測 PID 1 = python -u /app/bot.py
+    healthcheck:
+      test: ["CMD-SHELL", "grep -qa '/app/bot.py' /proc/1/cmdline && ls /vault >/dev/null 2>&1 || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
 
   openab-travel-nvidia:
     image: openab-nvidia:qwen
@@ -114,6 +134,12 @@ services:
       - "D:/discord 個人助理/TravelMemory:/workspace/TravelMemory"
       - aiquant_travelnvidia_qwen_state:/home/node/.qwen
       - ./config-travel-nvidia.toml:/etc/openab/config.toml:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pgrep -x openab >/dev/null && ls /workspace/TravelMemory >/dev/null 2>&1 || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
 
   # ─────────────────────────────────────────────────────────────────────────
   # #不動產估價 — qwen-code 殼 → NVIDIA NIM（2026-06-20）。第三個共用
@@ -140,6 +166,12 @@ services:
       - assistant_estate_kiro_state:/home/agent/.kiro
       - assistant_estate_kiro_auth:/home/agent/.local/share/kiro-cli
       - ./config-estate.toml:/etc/openab/config.toml:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pgrep -x openab >/dev/null && ls /workspace/EstateSpace >/dev/null 2>&1 || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
 
   # ─────────────────────────────────────────────────────────────────────────
   # #travel-planner 彙整 — Claude Code，用「獨立的 Pro 帳號」（2026-06-12 改）：
@@ -164,6 +196,12 @@ services:
       # down -v 不會清（external）；真要換帳號就重跑 /login。
       - assistant_travelclaude_state:/home/node/.claude
       - ./config-travel-claude.toml:/etc/openab/config.toml:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pgrep -x openab >/dev/null && ls /workspace/TravelMemory >/dev/null 2>&1 || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
 
   # ─────────────────────────────────────────────────────────────────────────
   # #a-struct — Claude Code，A_struct 夜盤閘門法審核（2026-06-23）。
@@ -189,6 +227,12 @@ services:
       - "C:/Users/xx/Desktop/tmf-strategy-lab-main/tmf-strategy-lab-main/data/forward:/workspace/AStructSpace/forward"
       - assistant_astruct_state:/home/node/.claude
       - ./config-astruct.toml:/etc/openab/config.toml:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pgrep -x openab >/dev/null && ls /workspace/AStructSpace >/dev/null 2>&1 && ls /workspace/AStructSpace/forward >/dev/null 2>&1 || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
 
   # ─────────────────────────────────────────────────────────────────────────
   # #聯徵報告製作 — 真實 Codex CLI 後端。OpenAB 以 codex-acp（不是不存在的
@@ -223,6 +267,12 @@ services:
       # 新 volume 預設 root-owned，首次 device auth 前依 SETUP chown 1000:1000。
       - assistant_creditreport_codex_state:/home/node/.codex
       - ./config-credit-report.toml:/etc/openab/config.toml:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pgrep -x openab >/dev/null && ls /workspace/CreditReportSpace >/dev/null 2>&1 || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
 
   # ─────────────────────────────────────────────────────────────────────────
   # Steel Browser — agent 讀網頁用的瀏覽器沙箱。設定手冊 STEEL_SETUP.md。
@@ -295,6 +345,14 @@ services:
       - assistant_pdfpub_state:/state    # 已發佈 hash — 重啟不重發
     depends_on:
       - steel-api
+    # python:3.12-slim 沒有 pgrep；2026-08-27 docker top / /proc/1/cmdline
+    # 實測 PID 1 = python -u /app/publish.py
+    healthcheck:
+      test: ["CMD-SHELL", "grep -qa '/app/publish.py' /proc/1/cmdline && ls /vault >/dev/null 2>&1 || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
 
   # #url-intake Markdown → PDF。使用同一個 renderer image，但各自的 glob、
   # token、頻道與 state 完全分離；PDF 同時存入 Obsidian 的 URLIntake/PDF/。
@@ -325,6 +383,14 @@ services:
       - assistant_urlintake_pdfpub_state:/state
     depends_on:
       - steel-api
+    # python:3.12-slim 沒有 pgrep；2026-08-27 docker top / /proc/1/cmdline
+    # 實測 PID 1 = python -u /app/publish.py
+    healthcheck:
+      test: ["CMD-SHELL", "grep -qa '/app/publish.py' /proc/1/cmdline && ls /vault >/dev/null 2>&1 || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Named volumes — 全部沿用既有 volume（external），名稱含 aiquant_ 為歷史包袱。
