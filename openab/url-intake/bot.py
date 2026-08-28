@@ -20,10 +20,11 @@ import tempfile
 import time
 import unicodedata
 from pathlib import Path
-from urllib.parse import urlparse
+from urllib.parse import urljoin, urlparse
 
 import discord
 import requests
+import trafilatura
 from opencc import OpenCC
 from pypdf import PdfReader
 from youtube_transcript_api import YouTubeTranscriptApi
@@ -85,8 +86,44 @@ BLOCK_PAGE_MARKERS = (
     "請啟用 cookie",
     "您的請求已遭封鎖",
 )
+# Direct scrape follows redirects itself so each hop can be re-checked.
+DIRECT_MAX_REDIRECTS = int(os.environ.get("DIRECT_MAX_REDIRECTS", "5"))
+# Direct-scrape quality gate only (not applied to KiteSurf/Jina: those
+# extractors already strip chrome, and re-running this check would
+# false-positive on link-heavy essays).
+#
+# Link-text ratio: after trafilatura, a real article still has some
+# citations, but most characters are prose. TechOrange bodies we
+# measured sit well under 0.20 of characters inside [label](url).
+# A category/nav dump is almost only those spans. 0.45 keeps annotated
+# essays and still rejects menus.
+DIRECT_MAX_LINK_RATIO = float(os.environ.get("DIRECT_MAX_LINK_RATIO", "0.45"))
+# Short-line gate: nav dumps are many 2–12 character labels, one per
+# line. Chinese sentences are typically 20+ characters. Require at
+# least DIRECT_SHORT_LINE_MIN_LINES non-empty lines so a short title
+# card is not killed, then fail if the average line is under 28
+# characters. This branch ALSO requires a link-text floor: a markdown
+# nav dump is almost entirely [label](url), so a zero-link essay of
+# short paragraphs (listicles, briefings) is not a nav page. 0.20 sits
+# below the existing [分類N](/cat/N) fixture (~0.23) and well below
+# the standalone 0.45 "mostly links" reject, but above typical article
+# citation density.
+DIRECT_MIN_AVG_LINE_CHARS = float(os.environ.get("DIRECT_MIN_AVG_LINE_CHARS", "28"))
+DIRECT_SHORT_LINE_MIN_LINES = int(os.environ.get("DIRECT_SHORT_LINE_MIN_LINES", "15"))
+DIRECT_SHORT_LINE_MIN_LINK_RATIO = float(
+    os.environ.get("DIRECT_SHORT_LINE_MIN_LINK_RATIO", "0.20")
+)
+DIRECT_BROWSER_HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+        "(KHTML, like Gecko) Chrome/139.0.0.0 Safari/537.36"
+    ),
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    "Accept-Language": "zh-TW,zh;q=0.9,en;q=0.8",
+}
 
 URL_RE = re.compile(r"https?://[^\s<>()\[\]{}\"'，。！？；：、]+", re.IGNORECASE)
+MD_LINK_RE = re.compile(r"\[([^\]]+)\]\([^)]+\)")
 YT_RE = re.compile(
     r"https?://(?:www\.|m\.)?(?:youtube\.com/watch\?[^\s]*?v=|youtu\.be/)"
     r"([\w-]{11})",
@@ -397,6 +434,124 @@ def pdf_text(url: str) -> str:
         return "\n\n".join((page.extract_text() or "").strip() for page in reader.pages).strip()
 
 
+def _is_html_content_type(content_type: str) -> bool:
+    ctype = (content_type or "").lower().split(";")[0].strip()
+    return ctype in {"text/html", "application/xhtml+xml"} or ctype.endswith("+html")
+
+
+def _read_limited_body(response) -> bytes:
+    length = int(response.headers.get("content-length") or 0)
+    if length > MAX_DOWNLOAD_BYTES:
+        raise RuntimeError("來源檔案超過 30 MB 擷取上限")
+    chunks: list[bytes] = []
+    size = 0
+    for chunk in response.iter_content(1024 * 1024):
+        if not chunk:
+            continue
+        size += len(chunk)
+        if size > MAX_DOWNLOAD_BYTES:
+            raise RuntimeError("來源檔案超過 30 MB 擷取上限")
+        chunks.append(chunk)
+    return b"".join(chunks)
+
+
+def looks_like_nav_page(text: str) -> bool:
+    """True when extracted text looks like a nav/index dump, not an article.
+
+    Applied only to direct_scrape. KiteSurf and Jina already extract the
+    article; re-running this gate on those results would false-positive on
+    link-heavy essays.
+    """
+    if not text or not text.strip():
+        return False
+    link_chars = sum(len(match.group(1)) for match in MD_LINK_RE.finditer(text))
+    total = len(text)
+    link_ratio = (link_chars / total) if total else 0.0
+    if link_ratio > DIRECT_MAX_LINK_RATIO:
+        return True
+    lines = [line.strip() for line in text.splitlines() if line.strip()]
+    if (
+        len(lines) >= DIRECT_SHORT_LINE_MIN_LINES
+        and (sum(len(line) for line in lines) / len(lines)) < DIRECT_MIN_AVG_LINE_CHARS
+        and link_ratio >= DIRECT_SHORT_LINE_MIN_LINK_RATIO
+    ):
+        return True
+    return False
+
+
+def direct_scrape(url: str) -> str:
+    """Fetch HTML from this machine's network egress and extract the article.
+
+    Automatic redirects are off: each Location is re-checked with
+    ensure_public_url() before the next request, so a 302 to loopback or
+    a private range cannot bypass the SSRF guard.
+    """
+    current = url
+    raw = b""
+    for hop in range(DIRECT_MAX_REDIRECTS + 1):
+        ensure_public_url(current)
+        response = requests.get(
+            current,
+            headers=DIRECT_BROWSER_HEADERS,
+            timeout=90,
+            stream=True,
+            allow_redirects=False,
+        )
+        try:
+            redirected = response.is_redirect or response.status_code in {
+                301,
+                302,
+                303,
+                307,
+                308,
+            }
+            if redirected:
+                if hop >= DIRECT_MAX_REDIRECTS:
+                    raise RuntimeError(f"直連重導向超過 {DIRECT_MAX_REDIRECTS} 次")
+                location = (response.headers.get("Location") or "").strip()
+                if not location:
+                    raise RuntimeError("直連重導向缺少 Location")
+                current = urljoin(current, location)
+                continue
+            response.raise_for_status()
+            content_type = response.headers.get("Content-Type") or ""
+            if not _is_html_content_type(content_type):
+                raise RuntimeError(
+                    f"直連回應不是 HTML（Content-Type: {content_type or 'missing'}）"
+                )
+            raw = _read_limited_body(response)
+            break
+        finally:
+            response.close()
+    else:
+        raise RuntimeError(f"直連重導向超過 {DIRECT_MAX_REDIRECTS} 次")
+
+    # Pass bytes, not a decoded str. requests sets encoding=ISO-8859-1 for
+    # text/html with no charset; decoding ourselves turns UTF-8 CJK into
+    # mojibake that still passes every gate. trafilatura reads meta charset
+    # and BOM. Do not touch response.apparent_encoding after streaming:
+    # the body is already consumed and that access raises.
+    extracted = trafilatura.extract(
+        raw,
+        url=current,
+        include_comments=False,
+        include_tables=True,
+        include_links=True,
+        output_format="markdown",
+        favor_precision=True,
+    )
+    text = (extracted or "").strip()
+    if not text:
+        raise RuntimeError("直連未能抽出正文")
+    if looks_blocked(text):
+        raise RuntimeError(f"直連得到反機器人阻擋頁（{len(text)} 字）")
+    if looks_like_nav_page(text):
+        raise RuntimeError(
+            f"直連結果像導覽列而非內文（連結佔比／短行密度超標，{len(text)} 字）"
+        )
+    return text
+
+
 def looks_blocked(text: str) -> bool:
     """True when a scraper returned an anti-bot wall instead of the article.
 
@@ -460,8 +615,17 @@ def source_text(url: str) -> tuple[str, str]:
             take("Jina", jina_scrape(url))
         except Exception as exc:  # noqa: BLE001
             errors.append(f"Jina: {exc}")
-    # Local browser is the last resort: it costs CPU/RAM but exits from this
-    # machine's own address, which is the only path left when both remotes fail.
+    # Direct HTTPS from this machine's own egress: no extra CPU and no
+    # third-party reader. Cheaper than local Steel, and empirically
+    # reaches sites that block Cloudflare's rendering IPs (2026-08-28
+    # techorange.com).
+    if len(text) < MIN_BODY_CHARS:
+        try:
+            take("direct", direct_scrape(url))
+        except Exception as exc:  # noqa: BLE001
+            errors.append(f"direct: {exc}")
+    # Local browser is the last resort: it costs CPU/RAM but uses a real
+    # Chromium session. Direct already tried this machine's address.
     if len(text) < MIN_BODY_CHARS and ALLOW_STEEL_FALLBACK:
         try:
             take("Steel", steel_scrape(url))

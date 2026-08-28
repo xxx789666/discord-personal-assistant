@@ -130,13 +130,190 @@ class UrlIntakeTests(unittest.TestCase):
             patch.object(BOT, "ensure_public_url"),
             patch.object(BOT, "kitesurf_scrape", return_value=wall) as kite,
             patch.object(BOT, "jina_scrape", return_value=article) as jina,
+            patch.object(BOT, "direct_scrape") as direct,
         ):
             kind, text = BOT.source_text("https://techorange.com/2026/08/28/post/")
         kite.assert_called_once()
         jina.assert_called_once()
+        direct.assert_not_called()
         self.assertEqual(kind, "webpage")
         self.assertEqual(text, article)
         self.assertNotIn("blocked", text)
+
+    def test_source_text_falls_through_to_direct_when_jina_fails(self):
+        wall = (
+            "# Sorry, you have been blocked\n\n"
+            "## You are unable to access techorange.com\n" + "x" * 400
+        )
+        article = "真正的文章內容。" * 200
+        with (
+            patch.object(BOT, "ensure_public_url"),
+            patch.object(BOT, "kitesurf_scrape", return_value=wall),
+            patch.object(BOT, "jina_scrape", side_effect=RuntimeError("429")),
+            patch.object(BOT, "direct_scrape", return_value=article) as direct,
+            patch.object(BOT, "steel_scrape") as steel,
+        ):
+            kind, text = BOT.source_text("https://techorange.com/2026/08/28/post/")
+        direct.assert_called_once()
+        steel.assert_not_called()
+        self.assertEqual(kind, "webpage")
+        self.assertEqual(text, article)
+
+    def _mock_http_response(
+        self,
+        status_code=200,
+        headers=None,
+        body=b"",
+        encoding="utf-8",
+    ):
+        response = Mock()
+        response.status_code = status_code
+        response.is_redirect = status_code in {301, 302, 303, 307, 308}
+        response.headers = headers or {"Content-Type": "text/html; charset=utf-8"}
+        response.encoding = encoding
+        response.apparent_encoding = encoding
+        response.raise_for_status.return_value = None
+        response.close = Mock()
+        response.__enter__ = Mock(return_value=response)
+        response.__exit__ = Mock(return_value=False)
+        chunks = [body] if body else []
+        response.iter_content = Mock(return_value=iter(chunks))
+        return response
+
+    def test_direct_scrape_rejects_redirect_to_private_address(self):
+        public = "https://example.com/article"
+        private = "http://127.0.0.1/internal"
+        redirect = self._mock_http_response(
+            status_code=302,
+            headers={"Location": private},
+        )
+        get = Mock(return_value=redirect)
+
+        def fake_addrinfo(host, *args, **kwargs):
+            if host == "127.0.0.1":
+                return [(2, 1, 6, "", ("127.0.0.1", 0))]
+            return [(2, 1, 6, "", ("93.184.216.34", 0))]
+
+        with (
+            patch.object(BOT.requests, "get", get),
+            patch.object(BOT.socket, "getaddrinfo", side_effect=fake_addrinfo),
+        ):
+            with self.assertRaises(ValueError) as ctx:
+                BOT.direct_scrape(public)
+
+        self.assertIn("內網", str(ctx.exception))
+        get.assert_called_once()
+        self.assertEqual(get.call_args.args[0], public)
+        self.assertFalse(get.call_args.kwargs.get("allow_redirects", True))
+        for call in get.call_args_list:
+            self.assertNotIn("127.0.0.1", call.args[0])
+
+    def test_direct_scrape_rejects_non_html_content_type(self):
+        response = self._mock_http_response(
+            headers={"Content-Type": "application/pdf"},
+            body=b"%PDF-1.4",
+        )
+        with (
+            patch.object(BOT, "ensure_public_url"),
+            patch.object(BOT.requests, "get", return_value=response),
+        ):
+            with self.assertRaises(RuntimeError) as ctx:
+                BOT.direct_scrape("https://example.com/file.pdf")
+        self.assertIn("HTML", str(ctx.exception))
+        response.iter_content.assert_not_called()
+
+    def test_looks_like_nav_page_rejects_link_dump(self):
+        nav = "\n".join(f"[分類{i}](/cat/{i})" for i in range(40))
+        self.assertTrue(BOT.looks_like_nav_page(nav))
+        dense_links = " ".join(
+            f"[這是一段用來墊高連結文字佔比的導覽標籤{i:02d}](/p/{i})"
+            for i in range(30)
+        )
+        self.assertTrue(BOT.looks_like_nav_page(dense_links))
+        article = "真正的文章內容，這裡有足夠長的段落說明技術細節與產品能力。" * 20
+        self.assertFalse(BOT.looks_like_nav_page(article))
+
+    def test_looks_like_nav_page_allows_zero_link_short_paragraphs(self):
+        # 30 x 26 CJK chars, no markdown links — the shape that used to
+        # trip the short-line branch even though it cannot be a nav dump.
+        line = "這是一段沒有任何超連結的中文短段落測試文章的內容啊。"
+        self.assertEqual(len(line), 26)
+        prose = "\n".join([line] * 30)
+        self.assertNotIn("](", prose)
+        self.assertFalse(BOT.looks_like_nav_page(prose))
+
+    def test_direct_scrape_rejects_nav_like_extraction(self):
+        html = self._mock_http_response(body=b"<html><body>nav</body></html>")
+        nav = "\n".join(f"[分類{i}](/cat/{i})" for i in range(40))
+        with (
+            patch.object(BOT, "ensure_public_url"),
+            patch.object(BOT.requests, "get", return_value=html),
+            patch.object(BOT.trafilatura, "extract", return_value=nav),
+        ):
+            with self.assertRaises(RuntimeError) as ctx:
+                BOT.direct_scrape("https://example.com/")
+        self.assertRegex(str(ctx.exception), "導覽|內文")
+
+    def test_direct_scrape_accepts_zero_link_short_paragraph_article(self):
+        line = "這是一段沒有任何超連結的中文短段落測試文章的內容啊。"
+        prose = "\n".join([line] * 30)
+        html = self._mock_http_response(body=b"<html><body>article</body></html>")
+        with (
+            patch.object(BOT, "ensure_public_url"),
+            patch.object(BOT.requests, "get", return_value=html),
+            patch.object(BOT.trafilatura, "extract", return_value=prose),
+        ):
+            text = BOT.direct_scrape("https://example.com/essay")
+        self.assertEqual(text, prose)
+        self.assertIn("沒有任何超連結", text)
+        self.assertNotIn("](", text)
+
+    def _stream_response(self, body: bytes, content_type: str):
+        """A real requests.Response so header encoding matches production."""
+        from io import BytesIO
+
+        from requests import Response
+        from requests.utils import get_encoding_from_headers
+        from urllib3.response import HTTPResponse
+
+        raw = HTTPResponse(
+            body=BytesIO(body),
+            headers={"Content-Type": content_type},
+            status=200,
+            preload_content=False,
+            decode_content=False,
+        )
+        response = Response()
+        response.status_code = 200
+        response.headers["Content-Type"] = content_type
+        response.encoding = get_encoding_from_headers(response.headers)
+        response.raw = raw
+        response.url = "https://example.com/zh"
+        response.reason = "OK"
+        return response
+
+    def test_direct_scrape_extracts_utf8_html_without_charset(self):
+        chinese = (
+            "中文內容測試，這是一段夠長的正文用來確認沒有 charset 的 "
+            "text/html 仍能正確抽出漢字，而不是被當成 ISO-8859-1。"
+        )
+        html = (
+            "<!DOCTYPE html><html lang='zh-Hant'><head>"
+            "<meta charset='utf-8'><title>編碼測試文章</title></head>"
+            f"<body><article><h1>編碼測試文章</h1><p>{chinese}</p>"
+            "<p>第二段同樣是中文，避免抽取器因為內容太短而放棄。</p>"
+            "</article></body></html>"
+        ).encode("utf-8")
+        response = self._stream_response(html, "text/html")
+        self.assertEqual(response.encoding, "ISO-8859-1")
+        with (
+            patch.object(BOT, "ensure_public_url"),
+            patch.object(BOT.requests, "get", return_value=response),
+        ):
+            text = BOT.direct_scrape("https://example.com/zh")
+        self.assertIn("中文內容測試", text)
+        self.assertIn("編碼測試", text)
+        self.assertNotIn("ä¸", text)
 
     def test_parse_json_response_accepts_fence(self):
         data = BOT.parse_json_response(

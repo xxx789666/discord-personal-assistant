@@ -11,11 +11,13 @@
    - YouTube：字幕優先；全部無字幕時，以 yt-dlp 下載音訊並交 Groq Whisper
      轉錄。用逐字稿整理，不能只看標題或影片描述。
    - 一般文章、其他網頁：先用 Cloudflare KiteSurf 遠端瀏覽器擷取；正文太
-     薄或抓到反機器人阻擋頁時退 Jina Reader。預設不使用本機 Steel，仍失敗
+     薄或抓到反機器人阻擋頁時退 Jina Reader；Jina 失敗再從本機網路出口
+     直連原站（direct）。預設不使用本機 Steel（Steel 是最後手段），仍失敗
      就如實回報，不可根據標題猜內容。反機器人阻擋頁不算正文，絕不可整理
-     成筆記。
+     成筆記。direct 的導覽列密度檢查（高連結佔比，或短行且同時有連結）不可
+     套到 KiteSurf／Jina 結果上。
    - X／Twitter status：優先 FxTwitter API（含內嵌 Article 全文）；失敗才
-     退 KiteSurf／Jina。不可根據標題猜內容。
+     退 KiteSurf／Jina／direct。不可根據標題猜內容。
    - 網頁內嵌影片若抓不到字幕，應明確標記「未取得影片逐字稿」。
 3. 每個 URL 各建立一個 Markdown，檔名為
    `YYYY-MM-DD_HHMM_<英文或拼音短標題>.md`。同分鐘重名時在尾端加 `-2`、
