@@ -525,3 +525,22 @@ EXIT=0
 4. **為了 compose config/up，把主 checkout 的 token env 複製進 worktree `.local/`（gitignore）。** 沒複製 `infra_alert.env`。
 5. **`docker compose up` 有重建 searxng**（`./searxng-settings.yml` 路徑變了）。steel-api/ui 未動。quant/radar 堆疊不是這個 compose 專案。
 6. 規格 §6.3 的「先殺行程就不會跳 modal」**仍然未經實地驗證**。實作有 **900s** vmmem 超時後停手告警、不重試（不是 300s）。
+
+---
+
+## 文件漂移更正（2026-08-28，L-3）
+
+本文件中的 DryRun／SelfTest 輸出是**當時工具實際印出的內容**，保留原樣不修改。
+但實作已經改過，以下以此處為準：
+
+| 項目 | 本文擷取內容 | 現行實作 |
+|---|---|---|
+| 輪詢 VM 汰換的上限 | 300 秒 | **900 秒**（規格 §6.5：事故當下遠超 300 秒）|
+| 輪詢掛載恢復的上限 | 300 秒 | **600 秒** |
+| VM 汰換判定方式 | 輪詢 `vmmemWSL` 消失 | **`Get-VmRecycleDecision`**：boot_id 變更／`wsl --list --running` 無發行版／vmmem 消失，任一成立即完成。<br>2026-08-28 實測證明 `vmmemWSL` 可在整段汰換中持續存在，**不是必要條件** |
+| all-down（probed=0）語意 | 早期版本視為 OK | **視為 FAIL**，daemon 健康時走 2 tick 寬限後發資訊告警，不重啟、不自癒 |
+| 排程間隔 | 3 分鐘 | **5 分鐘** |
+| 排程 ExecutionTimeLimit | 未設定（預設 72 小時）| **1 小時**（M-4；配 `IgnoreNew`，一次卡死會擋掉後續所有觸發）|
+
+後續變更請見 `mount_watchdog_fix_m0_2026_08_28.md`、`mount_watchdog_fix_vmmem_2026_08_28.md`
+與 `mount_watchdog_review5_2026_08_27.md` 的跟進清單。

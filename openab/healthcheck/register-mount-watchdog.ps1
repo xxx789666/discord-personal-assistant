@@ -33,7 +33,9 @@ $start = (Get-Date).AddMinutes(1)
 $start = Get-Date -Year $start.Year -Month $start.Month -Day $start.Day -Hour $start.Hour -Minute $start.Minute -Second 0
 $trigger = New-ScheduledTaskTrigger -Once -At $start -RepetitionInterval (New-TimeSpan -Minutes 5)
 $principal = New-ScheduledTaskPrincipal -UserId $env:USERNAME -LogonType Interactive -RunLevel Limited
-$settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -StartWhenAvailable -MultipleInstances IgnoreNew
+# ExecutionTimeLimit 1 小時：預設 72 小時配 IgnoreNew，一次卡死會擋掉之後所有觸發。
+# 不可設得比 1 小時短——一次合法自癒最壞是 900s + 600s + 探測，約 30 分鐘。
+$settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -StartWhenAvailable -MultipleInstances IgnoreNew -ExecutionTimeLimit (New-TimeSpan -Hours 1)
 
 if ($PSCmdlet.ShouldProcess($TaskName, 'Register scheduled task')) {
   Register-ScheduledTask -TaskName $TaskName -Action $action -Trigger $trigger -Principal $principal -Settings $settings -Force | Out-Null

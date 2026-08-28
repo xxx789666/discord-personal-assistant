@@ -42,7 +42,6 @@ $DaemonConfirmCount = 2
 $AllDownConfirmCount = 2
 $ResidentDownMinutes = 30
 $ResidentAlertEveryMinutes = 60
-$DiscordFailExitCount = 3
 # 規格 §6.5：事故當下舊 VM 可能很久才真正換掉。vmmemWSL 行程在汰換後仍可能一直存在
 #（2026-08-28 維護實測：行程全程在、配額 31797→15991、uptime 68s）。900s 是退路不是成功條件。
 $VmmemTimeoutSec = 900
@@ -527,13 +526,20 @@ function Get-InterventionOutcome {
   $n = [int]$decision.Probed
   $m = @(Convert-ToArray $Results).Count
   $prevOk = Test-PreviousFailsNowOk $PrevFailed $Results
-  $claim = ($decision.Status -eq 'OK' -and $prevOk)
+  # M-1：自癒可由 unprobed 觸發，此時「先前失敗清單」本來就是空的。
+  # 空清單不代表「沒修好」，所以改以 probed/total 判定，且文案不可提
+  # 「先前失敗的掛載」——那批掛載根本不存在。
+  $noPrev = (@(Convert-ToArray $PrevFailed)).Count -eq 0
+  $claim = ($decision.Status -eq 'OK' -and ($prevOk -or ($noPrev -and $m -gt 0 -and $n -eq $m)))
 
   $verb = '自癒'
   if ($Mode -eq 'restart') { $verb = '重啟' }
 
   if ($claim) {
     $text = "<@$OwnerMention> ✅ **mount-watchdog** ${verb}完成：probed=$n/$m，先前失敗的掛載均已可讀。"
+    if ($noPrev) {
+      $text = "<@$OwnerMention> ✅ **mount-watchdog** ${verb}完成：probed=$n/$m，全部掛載可讀。"
+    }
     if ($Mode -eq 'restart') {
       $text = "<@$OwnerMention> ✅ **mount-watchdog** 已由重啟容器修復（先前 Scope=container）。probed=$n/$m。"
     }
@@ -558,19 +564,13 @@ function Get-InterventionOutcome {
     }
   }
   $text = "<@$OwnerMention> ⚠️ **mount-watchdog** ${verb}後僅 probed=$n/$m，先前失敗的掛載尚未全部可讀。這不是成功。"
+  if ($noPrev) {
+    $text = "<@$OwnerMention> ⚠️ **mount-watchdog** ${verb}後已可讀 $n/$m，其餘容器尚未起來。這不是成功。"
+  }
   return [pscustomobject]@{
     Decision = $decision; Failed = ,$failed; ClaimSuccess = $false
     Kind = 'incomplete'; Text = (Add-VmDegradedNotice $text $decision); Probed = $n; Total = $m
   }
-}
-
-function Get-NextDiscordFailCount {
-  param([int]$PrevCount, [bool]$SendFailedThisRun)
-  if ($SendFailedThisRun) {
-    if ($PrevCount -lt 1) { return 1 }
-    return $PrevCount
-  }
-  return 0
 }
 
 function Test-ThisRunAbnormal {
@@ -1226,8 +1226,9 @@ drwxr-xr-x 1 root root  512 Aug 27 00:00 e
   Assert-Eq $ivHeal.Kind $ivRestart.Kind 'heal and restart Kind identical on same data'
   Assert-True ($ivHeal.Text -notmatch '均已可讀') 'partial recover must not say all readable'
 
-  Assert-Eq (Get-NextDiscordFailCount -PrevCount 5 -SendFailedThisRun $false) 0 'healthy tick resets discordFailCount'
-  Assert-Eq (Get-NextDiscordFailCount -PrevCount 5 -SendFailedThisRun $true) 5 'failed send keeps count'
+  # L-1：原本這裡測 Get-NextDiscordFailCount，但主流程從未呼叫它，
+  # 且其中一條斷言描述的行為主流程並沒有實作。函式與常數已刪除。
+  # 真正的行為（健康輪把 discordFailCount 歸零）由 F-2 的三段式測試涵蓋。
   Assert-True (-not (Test-ThisRunAbnormal -NewStatus 'OK' -SendFailedThisRun $false)) 'healthy tick is not abnormal'
   Assert-True (Test-ThisRunAbnormal -NewStatus 'FAIL' -SendFailedThisRun $false) 'FAIL this run is abnormal'
   Assert-True (Test-ThisRunAbnormal -NewStatus 'OK' -SendFailedThisRun $true) 'send fail this run is abnormal'
@@ -1412,6 +1413,13 @@ drwxr-xr-x 1 root root  512 Aug 27 00:00 e
   if ($iSendFn -ge 0 -and $iWaitFn -gt $iSendFn) { $sendBody = $src.Substring($iSendFn, $iWaitFn - $iSendFn) }
   $regInSend = ([regex]::Matches($sendBody, 'Register-SendAttempt')).Count
   Assert-Eq $regInSend 2 'Register-SendAttempt only lives beside Send-WatchdogNotice'
+  # M-2：鎖住『唯一記帳出口』這個不變式。
+  # 合法的呼叫點恰好兩個：Send-WatchdogNotice 內那一個（會記帳），
+  # 以及 TestAlert 分支（刻意不記帳、不碰狀態檔）。
+  # 任何新增的 Discord 出口都會讓這條失敗，逼人回來想清楚要不要記帳。
+  # pattern 用拼接的，否則字串本身會在原始碼裡被自己數進去。
+  $discordExitPattern = 'Send-Discord' + 'Alert -Token'
+  Assert-Eq (([regex]::Matches($src, $discordExitPattern)).Count) 2 'exactly two Discord call sites'
   Assert-Eq ([regex]::Matches($src, 'function Get-ProbeRunDecision \{')).Count 1 'exactly one Get-ProbeRunDecision (no second judge)'
   Assert-Eq ([regex]::Matches($src, 'function Get-VmRecycleDecision \{')).Count 1 'exactly one Get-VmRecycleDecision (no second recycle judge)'
   Assert-True ($src -match 'Get-ScopeAction -Scope \$scope -VmDegraded') 'main passes VmDegraded into Get-ScopeAction'
@@ -1543,7 +1551,8 @@ function Send-DiscordAlert {
     -Headers @{ Authorization = "Bot $Token"; "User-Agent" = $ua } `
     -ContentType 'application/json; charset=utf-8' `
     -Body ([Text.Encoding]::UTF8.GetBytes($body)) `
-    -UseBasicParsing
+    -UseBasicParsing `
+    -TimeoutSec 20
   return @{ Code = [int]$resp.StatusCode; Body = [string]$resp.Content }
 }
 
@@ -1653,12 +1662,12 @@ function Invoke-Tier1Probe {
 }
 
 function Invoke-Tier2Probe {
-  $args = @(
+  $dockerArgs = @(
     'run', '--rm', '--privileged', '--pid=host', 'alpine',
     'nsenter', '-t', '1', '-m', '-u', '-n', '-i',
     'sh', '-c', 'ls -la /run/desktop/mnt/host/'
   )
-  $r = Invoke-Cmd 'docker' $args $Tier2TimeoutSec
+  $r = Invoke-Cmd 'docker' $dockerArgs $Tier2TimeoutSec
   $scope = Get-Tier2Scope -ExitCode $r.Code -Output $r.Out -ErrorOutput $r.Err
   Write-Log ("[T2] exit={0} scope={1}" -f $r.Code, $scope)
   if (($r.Out).Trim() -ne '') {
@@ -1868,9 +1877,9 @@ function Stop-DockerDesktopProcesses {
 function Wait-HostMountReadable {
   param([int]$TimeoutSec = 600, [int]$PollSec = 10)
   $deadline = (Get-Date).AddSeconds($TimeoutSec)
-  $args = @('run', '--rm', '-v', "${HostVaultProbe}:/vault", 'alpine', 'ls', '/vault')
+  $dockerArgs = @('run', '--rm', '-v', "${HostVaultProbe}:/vault", 'alpine', 'ls', '/vault')
   while ((Get-Date) -lt $deadline) {
-    $r = Invoke-Cmd 'docker' $args 30
+    $r = Invoke-Cmd 'docker' $dockerArgs 30
     if ($r.Code -eq 0) {
       Write-Log '[HEAL] alpine ls /vault succeeded'
       return $true
@@ -1886,7 +1895,7 @@ function Invoke-SelfHealLadder {
   Write-Log '[HEAL] starting VM self-heal ladder'
 
   $startText = "<@$OwnerId> ⚠️ **mount-watchdog** 偵測到 VM 層級掛載故障，開始自癒（先 wsl --shutdown，再殺 Docker Desktop 行程後重開；**不用** docker desktop restart）。"
-  Send-WatchdogNotice -Text $startText -AlertCfg $AlertCfg -WouldSend $true
+  [void](Send-WatchdogNotice -Text $startText -AlertCfg $AlertCfg -WouldSend $true)
 
   $healAt = @(Convert-ToArray $State.healAt)
   $healAt += $Now.ToString('o')
@@ -1914,7 +1923,7 @@ function Invoke-SelfHealLadder {
   $gone = Wait-VmRecycled -Before $before -TimeoutSec $VmmemTimeoutSec
   if (-not $gone) {
     $msg = "<@$OwnerId> 🛑 **mount-watchdog** 自癒停手：900 秒內未能確認 VM 已汰換（boot_id 未變且 wsl 仍有發行版，vmmemWSL 仍在也不算完成）。需要人工處理／重開機。不會自動重試。"
-    Send-WatchdogNotice -Text $msg -AlertCfg $AlertCfg -WouldSend $true
+    [void](Send-WatchdogNotice -Text $msg -AlertCfg $AlertCfg -WouldSend $true)
     Write-Log '[HEAL] abort: VM recycle timeout'
     $State.manualRequired = $true
     $State.manualRequiredAt = $Now.ToString('o')
@@ -1929,7 +1938,7 @@ function Invoke-SelfHealLadder {
   Write-Log '[HEAL] step 5: start Docker Desktop.exe'
   if (-not (Test-Path $DockerDesktopExe)) {
     $msg = "<@$OwnerId> 🛑 **mount-watchdog** 自癒停手：找不到 Docker Desktop.exe。需要人工處理。不會自動重試。"
-    Send-WatchdogNotice -Text $msg -AlertCfg $AlertCfg -WouldSend $true
+    [void](Send-WatchdogNotice -Text $msg -AlertCfg $AlertCfg -WouldSend $true)
     $State.manualRequired = $true
     $State.manualRequiredAt = $Now.ToString('o')
     Write-WatchdogState -State $State -Path $StateFile
@@ -1943,7 +1952,7 @@ function Invoke-SelfHealLadder {
   $readable = Wait-HostMountReadable -TimeoutSec $MountProbeTimeoutSec
   if (-not $readable) {
     $msg = "<@$OwnerId> 🛑 **mount-watchdog** 自癒停手：Docker 重開後 600 秒內仍無法 ls 掛載（可能卡在 modal 對話框）。需要人工處理／重開機。不會自動重試。"
-    Send-WatchdogNotice -Text $msg -AlertCfg $AlertCfg -WouldSend $true
+    [void](Send-WatchdogNotice -Text $msg -AlertCfg $AlertCfg -WouldSend $true)
     Write-Log '[HEAL] abort: mount probe timeout'
     $State.manualRequired = $true
     $State.manualRequiredAt = $Now.ToString('o')
