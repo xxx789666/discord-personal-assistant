@@ -15,10 +15,15 @@ $ErrorActionPreference = 'Stop'
 
 $TaskName = 'OpenAB-MountWatchdog'
 $ScriptPath = Join-Path $PSScriptRoot 'mount-watchdog.ps1'
-$Arg = "-NoProfile -ExecutionPolicy Bypass -File `"$ScriptPath`""
+# 透過 run-hidden.vbs 啟動，否則每 5 分鐘會跳出一個 PowerShell 視窗。
+# -WindowStyle Hidden 不夠：主控台先建立、樣式後套用，仍會閃一下。
+# vbs 裡用 bWaitOnReturn=True + WScript.Quit 把 exit code 傳回來，
+# LastTaskResult 才能繼續當健康訊號用（實測：exit 7 -> 7，正常 -> 0）。
+$LauncherPath = Join-Path $PSScriptRoot 'run-hidden.vbs'
+$Arg = "//nologo `"$LauncherPath`" `"$ScriptPath`""
 
 Write-Output "TaskName : $TaskName"
-Write-Output "Execute  : powershell.exe"
+Write-Output "Execute  : wscript.exe (run-hidden.vbs -> powershell.exe, 無視窗)"
 Write-Output "Argument : $Arg"
 Write-Output 'Trigger  : once at next minute, repetition every 5 minutes'
 Write-Output 'Duration : omitted (indefinite; do not pass [TimeSpan]::MaxValue)'
@@ -27,8 +32,11 @@ Write-Output 'Logon    : Interactive (Docker Desktop 需要使用者 session)'
 if (-not (Test-Path $ScriptPath)) {
   throw "mount-watchdog.ps1 not found: $ScriptPath"
 }
+if (-not (Test-Path $LauncherPath)) {
+  throw "run-hidden.vbs not found: $LauncherPath"
+}
 
-$action = New-ScheduledTaskAction -Execute 'powershell.exe' -Argument $Arg
+$action = New-ScheduledTaskAction -Execute 'wscript.exe' -Argument $Arg
 $start = (Get-Date).AddMinutes(1)
 $start = Get-Date -Year $start.Year -Month $start.Month -Day $start.Day -Hour $start.Hour -Minute $start.Minute -Second 0
 $trigger = New-ScheduledTaskTrigger -Once -At $start -RepetitionInterval (New-TimeSpan -Minutes 5)
