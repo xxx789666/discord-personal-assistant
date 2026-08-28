@@ -43,7 +43,8 @@ $AllDownConfirmCount = 2
 $ResidentDownMinutes = 30
 $ResidentAlertEveryMinutes = 60
 $DiscordFailExitCount = 3
-# 規格 §6.5：事故當下 vmmemWSL 超過 10 分鐘才消失。300s 會讓 abort-vmmem 變常態。
+# 規格 §6.5：事故當下舊 VM 可能很久才真正換掉。vmmemWSL 行程在汰換後仍可能一直存在
+#（2026-08-28 維護實測：行程全程在、配額 31797→15991、uptime 68s）。900s 是退路不是成功條件。
 $VmmemTimeoutSec = 900
 $MountProbeTimeoutSec = 600
 # 內層 timeout 10s；host 15s 當第二道保險。最壞 12×15s=180s，排程改 5 分鐘以免卡滿一個 interval。
@@ -51,6 +52,11 @@ $Tier1TimeoutSec = 15
 $InnerLsTimeoutSec = 10
 $Tier2TimeoutSec = 30
 $LogMaxBytes = 5MB
+# FIX-M0：耗時基線。K/M 只增加資訊與保守性，不降低自癒門檻。
+$SlowMultiple = 5
+$SlowPeerMin = 2
+$DefaultBaselineSec = 0.5
+$BaselineWindow = 12
 
 # 規格 §4.1 完整掛載清單。Path 必須是掛載點本身，不可只 ls 父目錄。
 # Optional：compose profile 服務，沒起來是預期內，不算掛載故障。
@@ -95,6 +101,7 @@ function Get-InitialWatchdogState {
     lastAlertAt       = $null
     lastChangeAt      = $null
     failedMounts      = @()
+    probeDurations    = @{}
     healAt            = @()
     manualRequired    = $false
     manualRequiredAt  = $null
@@ -212,25 +219,179 @@ function Get-ProbedCount {
   return $n
 }
 
+function Convert-DurationMap {
+  param($Value)
+  $map = @{}
+  if ($null -eq $Value) { return ,$map }
+  if ($Value -is [hashtable]) {
+    foreach ($k in @($Value.Keys)) {
+      $nums = @()
+      foreach ($x in (Convert-ToArray $Value[$k])) {
+        if ($null -eq $x -or $x -eq '') { continue }
+        $nums += [double]$x
+      }
+      $map[[string]$k] = $nums
+    }
+    return ,$map
+  }
+  foreach ($p in $Value.PSObject.Properties) {
+    $nums = @()
+    foreach ($x in (Convert-ToArray $p.Value)) {
+      if ($null -eq $x -or $x -eq '') { continue }
+      $nums += [double]$x
+    }
+    $map[[string]$p.Name] = $nums
+  }
+  return ,$map
+}
+
+function Get-MedianSec {
+  param($Values)
+  $arr = @()
+  foreach ($v in (Convert-ToArray $Values)) {
+    if ($null -eq $v -or $v -eq '') { continue }
+    $arr += [double]$v
+  }
+  if ($arr.Count -eq 0) { return $null }
+  $sorted = @($arr | Sort-Object)
+  $n = $sorted.Count
+  $mid = [int][Math]::Floor(($n - 1) / 2)
+  if (($n % 2) -eq 1) { return [double]$sorted[$mid] }
+  return (([double]$sorted[$mid] + [double]$sorted[$mid + 1]) / 2.0)
+}
+
+function Get-MountBaselineSec {
+  param(
+    [string]$Key,
+    $DurationMap,
+    [double]$Default = 0.5
+  )
+  $map = Convert-DurationMap $DurationMap
+  if (-not $map.ContainsKey($Key)) { return $Default }
+  $med = Get-MedianSec $map[$Key]
+  if ($null -eq $med) { return $Default }
+  return [double]$med
+}
+
+function Update-ProbeDurationMap {
+  param($DurationMap, $Results, [int]$Window = 12)
+  $map = Convert-DurationMap $DurationMap
+  foreach ($r in (Convert-ToArray $Results)) {
+    if ($null -eq $r) { continue }
+    if ($r.Verdict -ne 'ok') { continue }
+    if ($null -eq $r.DurationSec -or $r.DurationSec -eq '') { continue }
+    $key = '{0}:{1}' -f $r.Container, $r.Path
+    $list = @()
+    if ($map.ContainsKey($key)) {
+      foreach ($x in (Convert-ToArray $map[$key])) { $list += [double]$x }
+    }
+    $list += [double]$r.DurationSec
+    if ($Window -gt 0 -and $list.Count -gt $Window) {
+      $start = $list.Count - $Window
+      $list = $list[$start..($list.Count - 1)]
+    }
+    $map[$key] = $list
+  }
+  return ,$map
+}
+
+function Format-ProbeDurationSec {
+  param($Seconds)
+  if ($null -eq $Seconds -or $Seconds -eq '') { return '' }
+  return ([string]::Format([System.Globalization.CultureInfo]::InvariantCulture, '{0:0.00}s', [double]$Seconds))
+}
+
+function Test-ProbeTimeout {
+  param($Result)
+  if ($null -eq $Result) { return $false }
+  if ($Result.Verdict -ne 'mount-fail') { return $false }
+  $detail = ''
+  if ($null -ne $Result.Detail) { $detail = [string]$Result.Detail }
+  if ($detail -match 'timeout') { return $true }
+  if ($null -ne $Result.DurationSec -and $Result.DurationSec -ne '') {
+    if ([double]$Result.DurationSec -ge [double]$Tier1TimeoutSec) { return $true }
+  }
+  return $false
+}
+
+function Get-ProbeLatencyAssessment {
+  param($Results, $Baselines = $null)
+  $map = Convert-DurationMap $Baselines
+  $timeouts = @()
+  $slowPeers = @()
+  foreach ($r in (Convert-ToArray $Results)) {
+    if ($null -eq $r) { continue }
+    if (Test-ProbeTimeout $r) {
+      $timeouts += $r
+      continue
+    }
+    if ($r.Verdict -ne 'ok' -and $r.Verdict -ne 'mount-fail') { continue }
+    if ($null -eq $r.DurationSec -or $r.DurationSec -eq '') { continue }
+    $dur = [double]$r.DurationSec
+    $key = '{0}:{1}' -f $r.Container, $r.Path
+    $base = [double]$DefaultBaselineSec
+    if ($map.ContainsKey($key)) {
+      $med = Get-MedianSec $map[$key]
+      if ($null -ne $med) { $base = [double]$med }
+    }
+    if ($base -le 0) { $base = [double]$DefaultBaselineSec }
+    if ($dur -ge ([double]$SlowMultiple * $base)) { $slowPeers += $r }
+  }
+  $peerCount = @($slowPeers).Count
+  $vm = (($timeouts.Count -gt 0) -and ($peerCount -ge [int]$SlowPeerMin))
+  return [pscustomobject]@{
+    HasTimeout    = ($timeouts.Count -gt 0)
+    SlowPeerCount = $peerCount
+    SlowPeers     = ,$slowPeers
+    Timeouts      = ,$timeouts
+    VmDegraded    = $vm
+  }
+}
+
+function Format-VmDegradedNote {
+  param($Decision)
+  if ($null -eq $Decision) { return '' }
+  if (-not [bool]$Decision.VmDegraded) { return '' }
+  $n = [int]$Decision.SlowPeerCount
+  return ('同一輪內另有 {0} 條掛載異常緩慢，可能是 VM 層級劣化而非單一容器問題' -f $n)
+}
+
+function Add-VmDegradedNotice {
+  param([string]$Text, $Decision)
+  $note = Format-VmDegradedNote $Decision
+  if ($note -eq '') { return $Text }
+  if ($null -eq $Text -or $Text -eq '') { return $note }
+  return ($Text + "`n" + $note)
+}
+
 function Get-ProbeRunDecision {
-  param($Results)
+  param(
+    $Results,
+    $Baselines = $null
+  )
   $failed = Get-MountFailResults $Results
   $probed = Get-ProbedCount $Results
+  $lat = Get-ProbeLatencyAssessment -Results $Results -Baselines $Baselines
+  $vm = [bool]$lat.VmDegraded
+  $peerN = [int]$lat.SlowPeerCount
   if ($failed.Count -gt 0) {
     return [pscustomobject]@{
       Status = 'FAIL'; NeedTier2 = $true; Probed = $probed
       ClearLatch = $false; AllowRecovered = $false; Reason = 'mount-fail'
+      VmDegraded = $vm; SlowPeerCount = $peerN
     }
   }
   if ($probed -eq 0) {
     return [pscustomobject]@{
       Status = 'FAIL'; NeedTier2 = $true; Probed = 0
       ClearLatch = $false; AllowRecovered = $false; Reason = 'unprobed'
+      VmDegraded = $false; SlowPeerCount = 0
     }
   }
   return [pscustomobject]@{
     Status = 'OK'; NeedTier2 = $false; Probed = $probed
     ClearLatch = $true; AllowRecovered = $true; Reason = 'ok'
+    VmDegraded = $false; SlowPeerCount = $peerN
   }
 }
 
@@ -284,7 +445,9 @@ function Format-FailList {
   foreach ($r in (Convert-ToArray $Results)) {
     if ($null -eq $r) { continue }
     if ($r.Verdict -eq 'mount-fail') {
-      $lines += ('• {0} {1} ({2})' -f $r.Container, $r.Path, $r.Detail)
+      $dur = Format-ProbeDurationSec $r.DurationSec
+      if ($dur -ne '') { $dur = ' ' + $dur }
+      $lines += ('• {0} {1} ({2}){3}' -f $r.Container, $r.Path, $r.Detail, $dur)
     }
   }
   return ($lines -join "`n")
@@ -355,10 +518,11 @@ function Get-InterventionOutcome {
     $Results,
     $PrevFailed,
     [string]$Mode = 'heal',
-    [string]$OwnerMention = 'OWNER'
+    [string]$OwnerMention = 'OWNER',
+    $Baselines = $null
   )
   if ($null -eq $OwnerMention -or $OwnerMention -eq '') { $OwnerMention = 'OWNER' }
-  $decision = Get-ProbeRunDecision $Results
+  $decision = Get-ProbeRunDecision $Results $Baselines
   $failed = Get-MountFailResults $Results
   $n = [int]$decision.Probed
   $m = @(Convert-ToArray $Results).Count
@@ -375,14 +539,14 @@ function Get-InterventionOutcome {
     }
     return [pscustomobject]@{
       Decision = $decision; Failed = ,$failed; ClaimSuccess = $true
-      Kind = 'ok'; Text = $text; Probed = $n; Total = $m
+      Kind = 'ok'; Text = (Add-VmDegradedNotice $text $decision); Probed = $n; Total = $m
     }
   }
   if ($decision.Reason -eq 'unprobed') {
     $text = "<@$OwnerMention> ⚠️ **mount-watchdog** ${verb}後仍無法探測：$m 條全部 SKIP（probed=0，容器尚未恢復）。這不是成功。"
     return [pscustomobject]@{
       Decision = $decision; Failed = ,$failed; ClaimSuccess = $false
-      Kind = 'unprobed'; Text = $text; Probed = $n; Total = $m
+      Kind = 'unprobed'; Text = (Add-VmDegradedNotice $text $decision); Probed = $n; Total = $m
     }
   }
   if ($decision.Reason -eq 'mount-fail') {
@@ -390,13 +554,13 @@ function Get-InterventionOutcome {
     $text = "<@$OwnerMention> ⚠️ **mount-watchdog** ${verb}後仍有 $failN 條掛載失敗：`n" + (Format-FailList $Results)
     return [pscustomobject]@{
       Decision = $decision; Failed = ,$failed; ClaimSuccess = $false
-      Kind = 'mount-fail'; Text = $text; Probed = $n; Total = $m
+      Kind = 'mount-fail'; Text = (Add-VmDegradedNotice $text $decision); Probed = $n; Total = $m
     }
   }
   $text = "<@$OwnerMention> ⚠️ **mount-watchdog** ${verb}後僅 probed=$n/$m，先前失敗的掛載尚未全部可讀。這不是成功。"
   return [pscustomobject]@{
     Decision = $decision; Failed = ,$failed; ClaimSuccess = $false
-    Kind = 'incomplete'; Text = $text; Probed = $n; Total = $m
+    Kind = 'incomplete'; Text = (Add-VmDegradedNotice $text $decision); Probed = $n; Total = $m
   }
 }
 
@@ -561,9 +725,15 @@ function Get-ComposeHealthcheckLsPaths {
 }
 
 function Get-ScopeAction {
-  param([string]$Scope)
+  param(
+    [string]$Scope,
+    [bool]$VmDegraded = $false
+  )
   if ($Scope -eq 'vm') { return 'self-heal' }
-  if ($Scope -eq 'container') { return 'restart-failed' }
+  if ($Scope -eq 'container') {
+    if ($VmDegraded) { return 'observe' }
+    return 'restart-failed'
+  }
   if ($Scope -eq 'daemon') { return 'alert-only' }
   if ($Scope -eq 'all-down') { return 'none' }
   return 'none'
@@ -593,11 +763,92 @@ function Test-AlertChannelConfigured {
   return $true
 }
 
+function Convert-WslListText {
+  param([string]$Raw)
+  if ($null -eq $Raw) { return '' }
+  return ([string]$Raw -replace "`0", '')
+}
+
+function Get-WslRunningLineCount {
+  param([string]$Output)
+  $s = Convert-WslListText $Output
+  $n = 0
+  foreach ($ln in ($s -replace "`r", '' -split "`n")) {
+    if ($ln.Trim() -ne '') { $n++ }
+  }
+  return $n
+}
+
+function Test-WslHasNoRunningDistro {
+  param(
+    [string]$Output,
+    [int]$ExitCode = 0,
+    [bool]$TimedOut = $false
+  )
+  if ($TimedOut) { return $false }
+  if ($ExitCode -eq 124) { return $false }
+  if ($ExitCode -eq 127) { return $false }
+  if ($ExitCode -ne 0) { return $false }
+  return ((Get-WslRunningLineCount $Output) -eq 0)
+}
+
+function Get-VmRecycleDecision {
+  param($Before, $After)
+  if ($null -eq $After) {
+    return [pscustomobject]@{ Recycled = $false; Reason = 'pending' }
+  }
+  $vmmem = $true
+  if ($null -ne $After.VmmemPresent) { $vmmem = [bool]$After.VmmemPresent }
+  if (-not $vmmem) {
+    return [pscustomobject]@{ Recycled = $true; Reason = 'vmmem-gone' }
+  }
+
+  $wslTimedOut = $false
+  if ($null -ne $After.WslTimedOut) { $wslTimedOut = [bool]$After.WslTimedOut }
+  $wslExit = 1
+  if ($null -ne $After.PSObject.Properties['WslExit']) {
+    try { $wslExit = [int]$After.WslExit } catch { $wslExit = 1 }
+  }
+  $wslOut = ''
+  if ($null -ne $After.WslOut) { $wslOut = [string]$After.WslOut }
+  if (Test-WslHasNoRunningDistro -Output $wslOut -ExitCode $wslExit -TimedOut $wslTimedOut) {
+    return [pscustomobject]@{ Recycled = $true; Reason = 'wsl-empty' }
+  }
+
+  $beforeOk = $false
+  if ($null -ne $Before -and [bool]$Before.Captured) { $beforeOk = $true }
+  $afterDocker = $false
+  if ([bool]$After.DockerOk) { $afterDocker = $true }
+  if ($beforeOk -and $afterDocker) {
+    $bBoot = ''
+    $aBoot = ''
+    if ($null -ne $Before.BootId) { $bBoot = [string]$Before.BootId }
+    if ($null -ne $After.BootId) { $aBoot = [string]$After.BootId }
+    if ($bBoot -ne '' -and $aBoot -ne '' -and $bBoot -ne $aBoot) {
+      return [pscustomobject]@{ Recycled = $true; Reason = 'boot-id' }
+    }
+    $bUp = $null
+    $aUp = $null
+    if ($null -ne $Before.UptimeSec -and $Before.UptimeSec -ne '') {
+      try { $bUp = [double]$Before.UptimeSec } catch { $bUp = $null }
+    }
+    if ($null -ne $After.UptimeSec -and $After.UptimeSec -ne '') {
+      try { $aUp = [double]$After.UptimeSec } catch { $aUp = $null }
+    }
+    $sameBoot = ($bBoot -ne '' -and $aBoot -ne '' -and $bBoot -eq $aBoot)
+    if (-not $sameBoot -and $null -ne $bUp -and $null -ne $aUp -and $aUp -lt $bUp) {
+      return [pscustomobject]@{ Recycled = $true; Reason = 'uptime' }
+    }
+  }
+
+  return [pscustomobject]@{ Recycled = $false; Reason = 'pending' }
+}
+
 function Get-SelfHealSteps {
   return @(
     'Discord 告警：偵測到 VM 層級掛載故障，開始自癒',
-    'wsl --shutdown（不等待指令返回，改輪詢 vmmemWSL）',
-    '輪詢 vmmemWSL／vmmem 直到消失，上限 900 秒；超時則停手並告警需要人工處理／重開機（不再重試，寫入 manualRequired 閂鎖）',
+    'wsl --shutdown（不等待指令返回；關機前先取 VM boot_id／uptime 基準）',
+    '輪詢 VM 汰換：boot_id 變更、wsl 無 running distro、或 vmmemWSL 消失（任一即可）；上限 900 秒。vmmemWSL 仍在不代表失敗。超時則停手並告警需要人工處理／重開機（不再重試，寫入 manualRequired 閂鎖）',
     '殺掉殘留行程：Docker Desktop, com.docker.backend, com.docker.build（不用 docker desktop restart）',
     '啟動 C:\Program Files\Docker\Docker\Docker Desktop.exe',
     '輪詢 docker run --rm -v "D:/discord 個人助理/URLIntake:/vault" alpine ls /vault 直到成功，上限 600 秒',
@@ -691,6 +942,7 @@ function Invoke-SelfTest {
   Assert-Eq $decOk.Status 'OK' 'mixed stopped+absent+ok => status OK'
   Assert-True $decOk.ClearLatch 'probed>0 OK may clear latch'
   Assert-True $decOk.AllowRecovered 'probed>0 OK may send recovered'
+  Assert-True (-not $decOk.VmDegraded) 'mixed without duration/timeout is not VM-degraded'
 
   $allSkip = @(
     [pscustomobject]@{ Container = 'a'; Path = '/x'; Verdict = 'absent' },
@@ -851,10 +1103,97 @@ drwxr-xr-x 1 root root  512 Aug 27 00:00 e
   $steps = Get-SelfHealSteps
   Assert-Eq $steps.Count 7 'self-heal ladder has 7 steps'
   $joined = $steps -join ' | '
-  Assert-True ($joined -match 'vmmemWSL') 'ladder polls vmmemWSL not command return'
+  Assert-True ($joined -match 'vmmemWSL') 'ladder still names vmmemWSL as one recycle signal'
+  Assert-True ($joined -match 'boot_id') 'ladder waits on VM identity not only vmmem process'
   Assert-True ($joined -match '900') 'ladder vmmem timeout is 900s not 300s'
   Assert-True ($joined -match '不用 docker desktop restart') 'ladder states kill-then-start not CLI restart'
   Assert-True ($joined -match 'manualRequired') 'ladder text mentions abort latch'
+  Assert-Eq $VmmemTimeoutSec 900 'recycle wait timeout stays 900s (escape hatch kept)'
+
+  # FIX-VMMEM：2026-08-28 維護實測 — vmmemWSL 全程存在，但 VM 已汰換（uptime 68s、配額腰斬）
+  $beforeToday = [pscustomobject]@{ Captured = $true; BootId = 'old-boot-aaaaaaaa'; UptimeSec = 86400 }
+  $afterToday = [pscustomobject]@{
+    VmmemPresent = $true
+    WslTimedOut  = $false
+    WslExit      = 0
+    WslOut       = "Windows Subsystem for Linux Distributions:`ndocker-desktop"
+    DockerOk     = $true
+    BootId       = 'new-boot-bbbbbbbb'
+    UptimeSec    = 68
+    Captured     = $true
+  }
+  $decToday = Get-VmRecycleDecision -Before $beforeToday -After $afterToday
+  Assert-True $decToday.Recycled '2026-08-28 maintenance: vmmem still present but boot_id changed => recycled'
+  Assert-Eq $decToday.Reason 'boot-id' 'today recycle reason is boot-id (not vmmem-gone)'
+
+  $afterStuck = [pscustomobject]@{
+    VmmemPresent = $true
+    WslTimedOut  = $true
+    WslExit      = 124
+    WslOut       = ''
+    DockerOk     = $false
+    BootId       = ''
+    UptimeSec    = $null
+    Captured     = $false
+  }
+  $decStuck = Get-VmRecycleDecision -Before $beforeToday -After $afterStuck
+  Assert-True (-not $decStuck.Recycled) 'stuck VM: vmmem present + wsl timeout + docker down => pending (will hit 900s abort)'
+  Assert-Eq $decStuck.Reason 'pending' 'stuck VM reason=pending'
+
+  $afterSame = [pscustomobject]@{
+    VmmemPresent = $true
+    WslTimedOut  = $false
+    WslExit      = 0
+    WslOut       = 'docker-desktop'
+    DockerOk     = $true
+    BootId       = 'old-boot-aaaaaaaa'
+    UptimeSec    = 86410
+    Captured     = $true
+  }
+  Assert-True (-not (Get-VmRecycleDecision -Before $beforeToday -After $afterSame).Recycled) 'same boot_id is not a recycle'
+
+  $afterGone = [pscustomobject]@{
+    VmmemPresent = $false; WslTimedOut = $false; WslExit = 0; WslOut = ''
+    DockerOk = $false; BootId = ''; UptimeSec = $null
+  }
+  $decGone = Get-VmRecycleDecision -Before $beforeToday -After $afterGone
+  Assert-True $decGone.Recycled 'vmmem gone remains a sufficient recycle signal'
+  Assert-Eq $decGone.Reason 'vmmem-gone' 'vmmem-gone reason'
+
+  $afterEmpty = [pscustomobject]@{
+    VmmemPresent = $true; WslTimedOut = $false; WslExit = 0
+    WslOut = ''; DockerOk = $false; BootId = ''; UptimeSec = $null
+  }
+  $decEmpty = Get-VmRecycleDecision -Before $beforeToday -After $afterEmpty
+  Assert-True $decEmpty.Recycled 'wsl --list --running --quiet with 0 names => recycle (shutdown finished)'
+  Assert-Eq $decEmpty.Reason 'wsl-empty' 'wsl-empty reason'
+
+  Assert-True (Test-WslHasNoRunningDistro -Output '' -ExitCode 0 -TimedOut $false) 'zero non-empty lines is no running distro'
+  Assert-True (-not (Test-WslHasNoRunningDistro -Output "docker-desktop`nUbuntu" -ExitCode 0 -TimedOut $false)) 'distro name lines are running'
+  Assert-True (-not (Test-WslHasNoRunningDistro -Output '沒有正在執行的發佈。' -ExitCode 0 -TimedOut $false)) 'zh-TW prose is not the empty signal (line count only)'
+  Assert-True (-not (Test-WslHasNoRunningDistro -Output 'There are no running distributions.' -ExitCode 0 -TimedOut $false)) 'English banner is not the empty signal (use --quiet)'
+  Assert-True (-not (Test-WslHasNoRunningDistro -Output '' -ExitCode 127 -TimedOut $false)) 'exit 127 empty is a failed invocation not wsl-empty'
+  Assert-True (-not (Test-WslHasNoRunningDistro -Output '' -ExitCode 124 -TimedOut $true)) 'wsl list timeout is NOT treated as empty'
+  $nulOnly = "`0`0"
+  Assert-True (Test-WslHasNoRunningDistro -Output $nulOnly -ExitCode 0 -TimedOut $false) 'NUL-only UTF-16 padding counts as zero lines'
+
+  $beforeUp = [pscustomobject]@{ Captured = $true; BootId = ''; UptimeSec = 100000 }
+  $afterUp = [pscustomobject]@{
+    VmmemPresent = $true; WslTimedOut = $false; WslExit = 0; WslOut = 'docker-desktop'
+    DockerOk = $true; BootId = ''; UptimeSec = 68
+  }
+  $decUp = Get-VmRecycleDecision -Before $beforeUp -After $afterUp
+  Assert-True $decUp.Recycled 'uptime reset without boot_id (today: 68s) => recycled'
+  Assert-Eq $decUp.Reason 'uptime' 'uptime-reset reason'
+
+  $beforeNone = [pscustomobject]@{ Captured = $false }
+  $afterOrphan = [pscustomobject]@{
+    VmmemPresent = $true; WslTimedOut = $false; WslExit = 0; WslOut = 'docker-desktop'
+    DockerOk = $true; BootId = 'xyz'; UptimeSec = 68
+  }
+  Assert-True (-not (Get-VmRecycleDecision -Before $beforeNone -After $afterOrphan).Recycled) 'no pre-shutdown baseline: docker coming back is not proof of recycle'
+
+  Assert-Eq (Get-ScopeAction 'vm') 'self-heal' 'FIX-VMMEM does not lower Scope=vm heal trigger'
 
   Assert-Eq (Get-ScopeAction 'all-down') 'none' 'all-down => no restart/heal'
 
@@ -926,6 +1265,105 @@ drwxr-xr-x 1 root root  512 Aug 27 00:00 e
   )
   Assert-True (Test-PreviousFailsNowOk $mixedPrev $nowOk) 'claim recovered only when previous fails are ok'
 
+  # FIX-M0：探測耗時納入判定。2026-08-27 20:56 真實數字（非合成）。
+  # 基線用 20:51 正常輪 ~0.17s；timeout 本身不計入 K，另有 11.0 / 2.5 / 1.8 三條超基線。
+  $incident2056 = @(
+    [pscustomobject]@{ Container = 'openab-url-intake'; Path = '/vault'; Verdict = 'mount-fail'; DurationSec = 15.0; Detail = 'timeout ls /vault (exit 124)' },
+    [pscustomobject]@{ Container = 'intake-publisher'; Path = '/vault'; Verdict = 'ok'; DurationSec = 11.0; Detail = 'OK' },
+    [pscustomobject]@{ Container = 'pdf-publisher'; Path = '/vault'; Verdict = 'ok'; DurationSec = 0.17; Detail = 'OK' },
+    [pscustomobject]@{ Container = 'openab-estate'; Path = '/workspace/EstateSpace'; Verdict = 'ok'; DurationSec = 2.5; Detail = 'OK' },
+    [pscustomobject]@{ Container = 'openab-travel-claude'; Path = '/workspace/TravelMemory'; Verdict = 'ok'; DurationSec = 1.8; Detail = 'OK' },
+    [pscustomobject]@{ Container = 'openab-travel-nvidia'; Path = '/workspace/TravelMemory'; Verdict = 'ok'; DurationSec = 0.17; Detail = 'OK' },
+    [pscustomobject]@{ Container = 'openab-credit-report'; Path = '/workspace/CreditReportSpace'; Verdict = 'ok'; DurationSec = 0.17; Detail = 'OK' },
+    [pscustomobject]@{ Container = 'openab-kiro'; Path = '/workspace/KiroSpace'; Verdict = 'ok'; DurationSec = 0.17; Detail = 'OK' },
+    [pscustomobject]@{ Container = 'openab-kiro'; Path = '/workspace/TravelMemory'; Verdict = 'ok'; DurationSec = 0.17; Detail = 'OK' },
+    [pscustomobject]@{ Container = 'openab-nvidia-lab'; Path = '/workspace/LabSpace'; Verdict = 'ok'; DurationSec = 0.17; Detail = 'OK' },
+    [pscustomobject]@{ Container = 'openab-astruct'; Path = '/workspace/AStructSpace'; Verdict = 'ok'; DurationSec = 0.17; Detail = 'OK' },
+    [pscustomobject]@{ Container = 'openab-astruct'; Path = '/workspace/AStructSpace/forward'; Verdict = 'ok'; DurationSec = 0.17; Detail = 'OK' }
+  )
+  $base017 = @{}
+  foreach ($row in $incident2056) {
+    $base017[('{0}:{1}' -f $row.Container, $row.Path)] = @(0.17, 0.17, 0.18)
+  }
+  $decIncident = Get-ProbeRunDecision $incident2056 $base017
+  Assert-Eq $decIncident.Status 'FAIL' '20:56 still FAIL (timeout is mount-fail)'
+  Assert-Eq $decIncident.Reason 'mount-fail' '20:56 reason remains mount-fail'
+  Assert-True ($null -ne $decIncident.VmDegraded) 'decision always exposes VmDegraded'
+  Assert-True $decIncident.VmDegraded '20:56 timeout + 3 slow peers => VM-level suspicion'
+  Assert-True ([int]$decIncident.SlowPeerCount -ge 2) '20:56 SlowPeerCount >= K=2'
+  Assert-True ($decIncident.SlowPeerCount -ge 3) '20:56 with 0.17s baseline flags 11.0+2.5+1.8 (3 peers)'
+
+  $normal017 = @()
+  foreach ($row in $incident2056) {
+    $normal017 += [pscustomobject]@{
+      Container = $row.Container; Path = $row.Path; Verdict = 'ok'
+      DurationSec = 0.17; Detail = 'OK'
+    }
+  }
+  $decNormal = Get-ProbeRunDecision $normal017 $base017
+  Assert-Eq $decNormal.Status 'OK' 'all-0.17s round stays OK'
+  Assert-True (-not $decNormal.VmDegraded) 'all-0.17s must not flag VM-level suspicion'
+
+  $isolated = @()
+  foreach ($row in $incident2056) {
+    $v = 'ok'; $d = 0.17; $det = 'OK'
+    if ($row.Container -eq 'openab-url-intake') {
+      $v = 'mount-fail'; $d = 15.0; $det = 'timeout ls /vault (exit 124)'
+    }
+    $isolated += [pscustomobject]@{
+      Container = $row.Container; Path = $row.Path; Verdict = $v
+      DurationSec = $d; Detail = $det
+    }
+  }
+  $decIsolated = Get-ProbeRunDecision $isolated $base017
+  Assert-Eq $decIsolated.Status 'FAIL' 'isolated timeout is still FAIL'
+  Assert-True (-not $decIsolated.VmDegraded) 'isolated timeout (no slow peers) is not VM-level suspicion'
+
+  $decCold = Get-ProbeRunDecision $incident2056 $null
+  Assert-True $decCold.VmDegraded '20:56 still VM-suspicion on cold-start default baseline 0.5s (11.0 and 2.5)'
+
+  Assert-Eq $SlowMultiple 5 'FIX-M0 M=5 is locked'
+  Assert-Eq $SlowPeerMin 2 'FIX-M0 K=2 is locked'
+  Assert-Eq $DefaultBaselineSec 0.5 'FIX-M0 cold-start baseline 0.5s is locked'
+  $medOdd = Get-MedianSec @(0.16, 0.17, 0.18)
+  Assert-True ([Math]::Abs([double]$medOdd - 0.17) -lt 0.0001) 'median of 3 samples is the middle'
+  $medEven = Get-MedianSec @(0.10, 0.20)
+  Assert-True ([Math]::Abs([double]$medEven - 0.15) -lt 0.0001) 'median of 2 samples is the mean'
+  Assert-True ([Math]::Abs((Get-MountBaselineSec -Key 'missing:/x' -DurationMap @{} -Default 0.5) - 0.5) -lt 0.0001) 'missing key uses conservative default'
+
+  $upd = Update-ProbeDurationMap @{} @(
+    [pscustomobject]@{ Container = 'a'; Path = '/x'; Verdict = 'ok'; DurationSec = 0.17 }
+  ) 12
+  Assert-Eq @(Convert-ToArray $upd['a:/x']).Count 1 'ok duration is recorded'
+  $upd2 = Update-ProbeDurationMap $upd @(
+    [pscustomobject]@{ Container = 'a'; Path = '/x'; Verdict = 'mount-fail'; DurationSec = 15.0 }
+  ) 12
+  Assert-Eq @(Convert-ToArray $upd2['a:/x']).Count 1 'timeout duration must not enter baseline'
+  $rtJson = @{ probeDurations = $upd } | ConvertTo-Json -Depth 6
+  $rtBack = $rtJson | ConvertFrom-Json
+  $rtMap = Convert-DurationMap $rtBack.probeDurations
+  Assert-True ([Math]::Abs(([double](Get-MedianSec $rtMap['a:/x'])) - 0.17) -lt 0.0001) 'probeDurations survives JSON round-trip'
+
+  $note = Format-VmDegradedNote $decIncident
+  Assert-True ($note -match '同一輪內另有 \d+ 條掛載異常緩慢，可能是 VM 層級劣化而非單一容器問題') 'alert note uses the required VM-suspicion sentence'
+  Assert-True ((Format-VmDegradedNote $decNormal) -eq '') 'OK round has no VM-suspicion sentence'
+
+  # 同一判定必須同時作用於主流程與自癒／重啟（Get-InterventionOutcome 走同一份 Get-ProbeRunDecision）
+  $ivHealM0 = Get-InterventionOutcome -Results $incident2056 -PrevFailed $incident2056 -Mode 'heal' -OwnerMention 'OWNER' -Baselines $base017
+  $ivRestartM0 = Get-InterventionOutcome -Results $incident2056 -PrevFailed $incident2056 -Mode 'restart' -OwnerMention 'OWNER' -Baselines $base017
+  Assert-True $ivHealM0.Decision.VmDegraded 'heal path sees VM-level suspicion (same judge)'
+  Assert-True $ivRestartM0.Decision.VmDegraded 'restart path sees VM-level suspicion (same judge)'
+  Assert-Eq $ivHealM0.Decision.VmDegraded $ivRestartM0.Decision.VmDegraded 'heal and restart VmDegraded identical'
+  Assert-True ($ivHealM0.Text -match 'VM 層級劣化') 'heal notice mentions VM-level suspicion'
+  Assert-True ($ivRestartM0.Text -match 'VM 層級劣化') 'restart notice mentions VM-level suspicion'
+
+  # 自癒觸發門檻不可因 VmDegraded 降低：仍只有 Scope=vm 才 self-heal
+  Assert-Eq (Get-ScopeAction 'vm') 'self-heal' 'vm => self-heal (threshold unchanged)'
+  Assert-Eq (Get-ScopeAction 'vm' -VmDegraded $true) 'self-heal' 'VmDegraded must NOT promote/demote Scope=vm heal'
+  Assert-Eq (Get-ScopeAction 'container') 'restart-failed' 'container without VmDegraded still restarts'
+  Assert-Eq (Get-ScopeAction 'container' -VmDegraded $true) 'observe' 'container+VmDegraded skips restart (conservative)'
+  Assert-Eq (Get-ScopeAction 'daemon' -VmDegraded $true) 'alert-only' 'daemon+VmDegraded still alert-only (no heal)'
+
   Assert-Eq (Resolve-FirstExistingPath -Explicit 'C:\forced.env' -Candidates @('C:\nope.env')) 'C:\forced.env' 'explicit AlertEnv wins over search'
   Assert-Eq (Resolve-FirstExistingPath -Explicit '' -Candidates @($PSScriptRoot, 'C:\no-such-mw.env')) $PSScriptRoot 'search picks first existing path'
 
@@ -963,13 +1401,47 @@ drwxr-xr-x 1 root root  512 Aug 27 00:00 e
   Assert-True ($ladderBody -notmatch 'Get-ProbeRunDecision') 'ladder body has no health judge'
   Assert-True ($ladderBody -notmatch 'Get-InterventionOutcome') 'ladder body has no intervention judge'
   Assert-True ($ladderBody -notmatch 'Register-SendAttempt') 'ladder body does not bookkeep sends itself'
+  Assert-True ($ladderBody -notmatch 'VmDegraded') 'ladder does not invent a second latency judge'
+  Assert-True ($ladderBody -notmatch 'Get-VmRecycleDecision') 'ladder body has no recycle judge (Wait-VmRecycled owns it)'
   Assert-True ($ladderBody.Contains('Send-WatchdogNotice')) 'ladder mid-flight still uses the single send'
+  Assert-True ($ladderBody.Contains('Wait-VmRecycled')) 'ladder waits via Wait-VmRecycled not vmmem-only'
+  Assert-True ($ladderBody.Contains('Get-VmRecycleSnapshot')) 'ladder captures pre-shutdown VM identity'
   $iSendFn = $src.LastIndexOf('function Send-WatchdogNotice {')
-  $iWaitFn = $src.LastIndexOf('function Wait-VmmemWslGone')
+  $iWaitFn = $src.LastIndexOf('function Wait-VmRecycled')
   $sendBody = ''
   if ($iSendFn -ge 0 -and $iWaitFn -gt $iSendFn) { $sendBody = $src.Substring($iSendFn, $iWaitFn - $iSendFn) }
   $regInSend = ([regex]::Matches($sendBody, 'Register-SendAttempt')).Count
   Assert-Eq $regInSend 2 'Register-SendAttempt only lives beside Send-WatchdogNotice'
+  Assert-Eq ([regex]::Matches($src, 'function Get-ProbeRunDecision \{')).Count 1 'exactly one Get-ProbeRunDecision (no second judge)'
+  Assert-Eq ([regex]::Matches($src, 'function Get-VmRecycleDecision \{')).Count 1 'exactly one Get-VmRecycleDecision (no second recycle judge)'
+  Assert-True ($src -match 'Get-ScopeAction -Scope \$scope -VmDegraded') 'main passes VmDegraded into Get-ScopeAction'
+  Assert-True ($src.Contains('Format-VmDegradedNote')) 'single formatter for the VM-suspicion sentence'
+  Assert-True ($src.Contains('Get-ProbeRunDecision $Results $Baselines')) 'intervention judge reuses Get-ProbeRunDecision + baselines'
+  Assert-True ($src.Contains("psi.Arguments = '--list --running --quiet'")) 'wsl flags passed as one unquoted argument string'
+  Assert-True ($src.Contains('[System.Text.Encoding]::Unicode')) 'wsl stdout decoded as UTF-16'
+  $iSnap = $src.LastIndexOf('function Get-VmRecycleSnapshot {')
+  $iStartWsl = $src.LastIndexOf('function Start-WslShutdownFireAndForget {')
+  $snapBody = ''
+  if ($iSnap -ge 0 -and $iStartWsl -gt $iSnap) { $snapBody = $src.Substring($iSnap, $iStartWsl - $iSnap) }
+  Assert-True ($snapBody.Contains('Invoke-WslListRunning')) 'snapshot lists WSL via Invoke-WslListRunning'
+  Assert-True ($snapBody -notmatch "Invoke-Cmd 'wsl.exe'") 'snapshot does not quote-wrap wsl.exe via Invoke-Cmd'
+  $iWait = $src.LastIndexOf('function Wait-VmRecycled {')
+  $iVmmem = $src.LastIndexOf('function Test-VmmemPresent {')
+  $waitBody = ''
+  if ($iWait -ge 0 -and $iVmmem -gt $iWait) { $waitBody = $src.Substring($iWait, $iVmmem - $iWait) }
+  Assert-True ($waitBody -match 'try') 'V-3: Wait-VmRecycled wraps snapshot in try'
+  Assert-True ($waitBody.Contains('recycle snapshot failed (will retry)')) 'V-3: snapshot throw retries the wait loop'
+
+  $wslLive = Invoke-WslListRunning 15
+  $liveLines = Get-WslRunningLineCount $wslLive.Out
+  Write-Output ("[WSL-LIVE] exit={0} lines={1}" -f $wslLive.Code, $liveLines)
+  Assert-True ($wslLive.Code -ne 127) 'wsl --list --running --quiet is flags not a distro command (exit!=127)'
+  Assert-True ($wslLive.Code -ne 124) 'wsl list did not time out'
+  $snap = Get-VmRecycleSnapshot
+  $snapLines = Get-WslRunningLineCount $snap.WslOut
+  Write-Output ("[SNAPSHOT-LIVE] wslExit={0} lines={1} dockerOk={2}" -f $snap.WslExit, $snapLines, $snap.DockerOk)
+  Assert-True ($snap.WslExit -ne 127) 'Get-VmRecycleSnapshot wsl exit is not 127'
+  Assert-Eq $snap.WslExit $wslLive.Code 'snapshot uses the same successful wsl invocation'
 
   if ($script:FailCount -gt 0) {
     Write-Output ("SelfTest FAILED: {0} assertion(s)" -f $script:FailCount)
@@ -978,14 +1450,7 @@ drwxr-xr-x 1 root root  512 Aug 27 00:00 e
   }
 }
 
-if ($SelfTest) {
-  # 不要把 SelfTest 的 Write-Output 擷進變數（會把 PASS 行跟 exit code 混在一起）。
-  Invoke-SelfTest
-  if ($script:FailCount -gt 0) { exit 1 }
-  exit 0
-}
-
-# ── 執行期 I/O（以下不會在 -SelfTest 走到）──────────────────────────────────
+# ── 執行期 I/O ────────────────────────────────────────────────────────────
 
 function Write-Log {
   param([string]$Message)
@@ -1015,6 +1480,35 @@ function Invoke-Cmd {
   $psi.RedirectStandardOutput = $true
   $psi.RedirectStandardError  = $true
   foreach ($a in $CmdArgs) { $psi.Arguments += '"' + ($a -replace '"', '\"') + '" ' }
+
+  $proc = New-Object System.Diagnostics.Process
+  $proc.StartInfo = $psi
+  [void]$proc.Start()
+  $outTask = $proc.StandardOutput.ReadToEndAsync()
+  $errTask = $proc.StandardError.ReadToEndAsync()
+  if (-not $proc.WaitForExit($TimeoutSec * 1000)) {
+    try { $proc.Kill() } catch {}
+    return @{ Code = 124; Out = ''; Err = "timeout after ${TimeoutSec}s" }
+  }
+  $out = $outTask.Result
+  $err = $errTask.Result
+  if ($null -eq $out) { $out = '' }
+  if ($null -eq $err) { $err = '' }
+  return @{ Code = [int]$proc.ExitCode; Out = [string]$out; Err = [string]$err }
+}
+
+function Invoke-WslListRunning {
+  param([int]$TimeoutSec = 10)
+  # wsl.exe 不解析被引號包住的旗標；Invoke-Cmd 的逐參加引號會變成「在預設 distro 裡執行 --list」。
+  # 必須整串傳 Arguments，並用 UTF-16 讀 stdout。
+  $psi = New-Object System.Diagnostics.ProcessStartInfo
+  $psi.FileName = 'wsl.exe'
+  $psi.Arguments = '--list --running --quiet'
+  $psi.UseShellExecute = $false
+  $psi.CreateNoWindow = $true
+  $psi.RedirectStandardOutput = $true
+  $psi.RedirectStandardError = $true
+  $psi.StandardOutputEncoding = [System.Text.Encoding]::Unicode
 
   $proc = New-Object System.Diagnostics.Process
   $proc.StartInfo = $psi
@@ -1085,6 +1579,7 @@ function Read-WatchdogState {
     lastAllDownAlertAt  = $obj.lastAllDownAlertAt
     discordFailCount    = (Get-CoercedInt $obj.discordFailCount 0)
     lastDiscordError    = $obj.lastDiscordError
+    probeDurations      = (Convert-DurationMap $obj.probeDurations)
   }
 }
 
@@ -1108,6 +1603,7 @@ function Write-WatchdogState {
     lastAllDownAlertAt  = $State.lastAllDownAlertAt
     discordFailCount    = (Get-CoercedInt $State.discordFailCount 0)
     lastDiscordError    = $State.lastDiscordError
+    probeDurations      = (Convert-DurationMap $State.probeDurations)
   }
   $json = $payload | ConvertTo-Json -Depth 6
   Set-Content -Path $Path -Value $json -Encoding utf8
@@ -1118,6 +1614,7 @@ function Invoke-Tier1Probe {
   foreach ($m in $Mounts) {
     $c = $m.Container
     $p = $m.Path
+    $t0 = Get-Date
     $insp = Invoke-Cmd 'docker' @('inspect', '-f', '{{.State.Running}}', $c) 10
     $execExit = 0
     $execOut = ''
@@ -1131,6 +1628,7 @@ function Invoke-Tier1Probe {
       $execOut = $r.Out
       $execErr = $r.Err
     }
+    $durationSec = ((Get-Date) - $t0).TotalSeconds
     $verdict = Get-MountVerdict -InspectExit $insp.Code -RunningRaw $insp.Out -ExecExit $execExit -ExecOut $execOut
     $detail = ($execOut).Trim()
     if ($detail -eq '') { $detail = ($execErr).Trim() }
@@ -1140,13 +1638,15 @@ function Invoke-Tier1Probe {
     $label = 'FAIL'
     if ($verdict -eq 'ok') { $label = 'OK' }
     if ($verdict -eq 'stopped' -or $verdict -eq 'absent') { $label = 'SKIP' }
-    Write-Log ("[T1] {0} {1} => {2} ({3})" -f $c, $p, $label, $detail)
+    $durLabel = Format-ProbeDurationSec $durationSec
+    Write-Log ("[T1] {0} {1} => {2} ({3}) {4}" -f $c, $p, $label, $detail, $durLabel)
     # Verdict 是唯一判定欄位。不再寫 Ok（舊欄位無人讀，避免被當成狀態機依據）。
     $results += [pscustomobject]@{
-      Container = $c
-      Path      = $p
-      Verdict   = $verdict
-      Detail    = $detail
+      Container   = $c
+      Path        = $p
+      Verdict     = $verdict
+      Detail      = $detail
+      DurationSec = $durationSec
     }
   }
   return ,$results
@@ -1261,30 +1761,80 @@ function Register-SendAttempt {
   $script:WatchdogLastError = [string]$Result.Reason
 }
 
-function Wait-VmmemWslGone {
-  param([int]$TimeoutSec = 900, [int]$PollSec = 5)
+function Wait-VmRecycled {
+  param($Before, [int]$TimeoutSec = 900, [int]$PollSec = 5)
   $deadline = (Get-Date).AddSeconds($TimeoutSec)
-  $warnedEmpty = $false
   while ((Get-Date) -lt $deadline) {
-    $found = @()
-    foreach ($n in @('vmmemWSL', 'vmmem')) {
-      $got = Get-Process -Name $n -ErrorAction SilentlyContinue
-      if ($null -ne $got) { $found += @($got) }
+    $after = $null
+    try {
+      $after = Get-VmRecycleSnapshot
+    } catch {
+      Write-Log ("[WARN] recycle snapshot failed (will retry): {0}" -f $_.Exception.Message)
+      Start-Sleep -Seconds $PollSec
+      continue
     }
-    if ($found.Count -eq 0) {
-      if (-not $warnedEmpty) {
-        Write-Log '[WARN] no vmmem* process found — assuming already down'
-        $warnedEmpty = $true
-      }
-      Write-Log '[HEAL] vmmemWSL/vmmem gone'
+    $dec = Get-VmRecycleDecision -Before $Before -After $after
+    if ($dec.Recycled) {
+      Write-Log ("[HEAL] VM recycle confirmed reason={0} vmmem={1} dockerOk={2} boot_id={3} uptime={4}" -f $dec.Reason, $after.VmmemPresent, $after.DockerOk, $after.BootId, $after.UptimeSec)
       return $true
     }
-    $ids = @()
-    foreach ($p in $found) { $ids += $p.Id }
-    Write-Log ('[HEAL] vmmem* still running (pid {0}), waiting...' -f ($ids -join ','))
+    Write-Log ('[HEAL] VM recycle pending (vmmem={0} dockerOk={1} wslTimeout={2}), waiting...' -f $after.VmmemPresent, $after.DockerOk, $after.WslTimedOut)
     Start-Sleep -Seconds $PollSec
   }
   return $false
+}
+
+function Test-VmmemPresent {
+  foreach ($n in @('vmmemWSL', 'vmmem')) {
+    $got = Get-Process -Name $n -ErrorAction SilentlyContinue
+    if ($null -ne $got) { return $true }
+  }
+  return $false
+}
+
+function Get-VmRecycleSnapshot {
+  param([int]$WslTimeoutSec = 10, [int]$DockerTimeoutSec = 20)
+  $vmmem = Test-VmmemPresent
+
+  $wsl = Invoke-WslListRunning $WslTimeoutSec
+  $wslTimedOut = ($wsl.Code -eq 124)
+  $wslText = ''
+  if ($null -ne $wsl.Out) { $wslText += [string]$wsl.Out }
+  if ($null -ne $wsl.Err) { $wslText += [string]$wsl.Err }
+
+  $dockerOk = $false
+  $bootId = ''
+  $uptimeSec = $null
+  $shell = 'cat /proc/sys/kernel/random/boot_id; cat /proc/uptime'
+  $dock = Invoke-Cmd 'docker' @('run', '--rm', 'alpine', 'sh', '-c', $shell) $DockerTimeoutSec
+  if ($dock.Code -eq 0) {
+    $dockerOk = $true
+    $lines = @()
+    $rawOut = ''
+    if ($null -ne $dock.Out) { $rawOut = [string]$dock.Out }
+    foreach ($ln in ($rawOut -replace "`r", '' -split "`n")) {
+      $t = $ln.Trim()
+      if ($t -ne '') { $lines += $t }
+    }
+    if ($lines.Count -ge 1) { $bootId = $lines[0] }
+    if ($lines.Count -ge 2) {
+      $upParts = $lines[1].Split(' ')
+      if ($upParts.Count -ge 1 -and $upParts[0] -ne '') {
+        try { $uptimeSec = [double]$upParts[0] } catch { $uptimeSec = $null }
+      }
+    }
+  }
+
+  return [pscustomobject]@{
+    VmmemPresent = $vmmem
+    WslTimedOut  = $wslTimedOut
+    WslExit      = [int]$wsl.Code
+    WslOut       = $wslText
+    DockerOk     = $dockerOk
+    BootId       = $bootId
+    UptimeSec    = $uptimeSec
+    Captured     = $dockerOk
+  }
 }
 
 function Start-WslShutdownFireAndForget {
@@ -1343,17 +1893,29 @@ function Invoke-SelfHealLadder {
   $State.healAt = $healAt
   Write-WatchdogState -State $State -Path $StateFile
 
-  Write-Log '[HEAL] step 2: wsl --shutdown (fire and forget)'
+  Write-Log '[HEAL] step 2: capture VM identity then wsl --shutdown (fire and forget)'
+  $before = $null
+  try {
+    $before = Get-VmRecycleSnapshot
+  } catch {
+    Write-Log ("[WARN] pre-shutdown VM snapshot failed: {0}" -f $_.Exception.Message)
+    $before = [pscustomobject]@{ Captured = $false; BootId = ''; UptimeSec = $null }
+  }
+  if ([bool]$before.Captured) {
+    Write-Log ("[HEAL] pre-shutdown boot_id={0} uptime={1}s" -f $before.BootId, $before.UptimeSec)
+  } else {
+    Write-Log '[HEAL] pre-shutdown docker identity unavailable; recycle wait will use wsl-empty/vmmem only'
+  }
   try { [void](Start-WslShutdownFireAndForget) } catch {
     Write-Log ("[WARN] wsl --shutdown start failed: {0}" -f $_.Exception.Message)
   }
 
-  Write-Log '[HEAL] step 3: poll vmmemWSL/vmmem up to 900s'
-  $gone = Wait-VmmemWslGone -TimeoutSec $VmmemTimeoutSec
+  Write-Log '[HEAL] step 3: poll VM recycle (boot_id / wsl-empty / vmmem) up to 900s'
+  $gone = Wait-VmRecycled -Before $before -TimeoutSec $VmmemTimeoutSec
   if (-not $gone) {
-    $msg = "<@$OwnerId> 🛑 **mount-watchdog** 自癒停手：vmmemWSL 在 900 秒內未消失，需要人工處理／重開機。不會自動重試。"
+    $msg = "<@$OwnerId> 🛑 **mount-watchdog** 自癒停手：900 秒內未能確認 VM 已汰換（boot_id 未變且 wsl 仍有發行版，vmmemWSL 仍在也不算完成）。需要人工處理／重開機。不會自動重試。"
     Send-WatchdogNotice -Text $msg -AlertCfg $AlertCfg -WouldSend $true
-    Write-Log '[HEAL] abort: vmmemWSL timeout'
+    Write-Log '[HEAL] abort: VM recycle timeout'
     $State.manualRequired = $true
     $State.manualRequiredAt = $Now.ToString('o')
     Write-WatchdogState -State $State -Path $StateFile
@@ -1422,6 +1984,13 @@ function Invoke-ContainerRestart {
 
 # ── 主流程 ────────────────────────────────────────────────────────────────
 
+if ($SelfTest) {
+  # 不要把 SelfTest 的 Write-Output 擷進變數（會把 PASS 行跟 exit code 混在一起）。
+  Invoke-SelfTest
+  if ($script:FailCount -gt 0) { exit 1 }
+  exit 0
+}
+
 # TestAlert 與正式路徑共用：worktree .local → D:\discord 個人助理\.local（或 -AlertEnv/-TokenEnv）
 $resolvedEnv = Resolve-AlertEnvPaths -AlertEnv $AlertEnv -TokenEnv $TokenEnv -RepoRoot $Root -KnownLocal $KnownCheckoutLocal
 $EnvAlert = $resolvedEnv.AlertPath
@@ -1482,7 +2051,8 @@ Write-Log ("[CFG] token env={0}" -f $EnvTokens)
 if ($DryRun) { Write-Log '[DRYRUN] detection will run; heal/kill/wsl/discord will not' }
 
 $tier1 = Invoke-Tier1Probe
-$decision = Get-ProbeRunDecision $tier1
+$durationMap = Convert-DurationMap $state.probeDurations
+$decision = Get-ProbeRunDecision $tier1 $durationMap
 $failed = Get-MountFailResults $tier1
 $notRunning = @()
 foreach ($r in (Convert-ToArray $tier1)) {
@@ -1497,7 +2067,9 @@ $scope = $null
 if ($decision.NeedTier2) {
   $t2 = Invoke-Tier2Probe
   $scope = $t2.Scope
-  Write-Log ("[PROBE] reason={0} probed={1} scope={2}" -f $decision.Reason, $decision.Probed, $scope)
+  Write-Log ("[PROBE] reason={0} probed={1} scope={2} vmDegraded={3} slowPeers={4}" -f $decision.Reason, $decision.Probed, $scope, $decision.VmDegraded, $decision.SlowPeerCount)
+} elseif ($decision.SlowPeerCount -gt 0) {
+  Write-Log ("[LATENCY] slowPeers={0} vmDegraded={1} (no timeout this round)" -f $decision.SlowPeerCount, $decision.VmDegraded)
 }
 
 # B2：Scope=daemon 第一次只記 log，不翻 FAIL（避免正常開關機洗版）
@@ -1530,7 +2102,7 @@ if (-not $decision.AllowRecovered -and $alert.Kind -eq 'recovered') {
   Write-Log '[SKIP] not sending recovered (no successful probe this run; latch kept)'
   $alert = [pscustomobject]@{ Send = $false; Kind = 'none' }
 }
-Write-Log ("[STATE] prev={0} new={1} scope={2} alert={3} send={4} probed={5}" -f $state.status, $newStatus, $scope, $alert.Kind, $alert.Send, $decision.Probed)
+Write-Log ("[STATE] prev={0} new={1} scope={2} alert={3} send={4} probed={5} vmDegraded={6} slowPeers={7}" -f $state.status, $newStatus, $scope, $alert.Kind, $alert.Send, $decision.Probed, $decision.VmDegraded, $decision.SlowPeerCount)
 
 $notice = $null
 if ($newStatus -eq 'FAIL') {
@@ -1539,6 +2111,7 @@ if ($newStatus -eq 'FAIL') {
     $failBody = ('（無 mount-fail 列；probed={0} reason={1}）' -f $decision.Probed, $decision.Reason)
   }
   $notice = "<@$OwnerId> ⚠️ **mount-watchdog** 掛載檢查失敗（Scope=$scope）`n" + $failBody
+  $notice = Add-VmDegradedNotice $notice $decision
 } elseif ($alert.Kind -eq 'recovered') {
   $notice = "<@$OwnerId> ✅ **mount-watchdog** 掛載已恢復（先前 Scope=$($state.scope)）"
 }
@@ -1553,7 +2126,7 @@ if ($null -ne $notice) {
 $healOutcome = $null
 $failedBeforeAction = $failed
 if ($newStatus -eq 'FAIL') {
-  $action = Get-ScopeAction $scope
+  $action = Get-ScopeAction -Scope $scope -VmDegraded ([bool]$decision.VmDegraded)
   Write-Log ("[ACTION] {0}" -f $action)
   if ($action -eq 'self-heal') {
     $budget = Get-HealBudget -HealAt $state.healAt -Now $now -MaxHeals $HealMax -WindowHours $HealWindowHours -MinIntervalMinutes $HealMinIntervalMinutes
@@ -1572,7 +2145,7 @@ if ($newStatus -eq 'FAIL') {
     } else {
       $healOutcome = Invoke-SelfHealLadder -AlertCfg $alertCfg -State $state -Now $now
       if ($healOutcome.Outcome -eq 'done' -and $healOutcome.Results.Count -gt 0) {
-        $iv = Get-InterventionOutcome -Results $healOutcome.Results -PrevFailed $failedBeforeAction -Mode 'heal' -OwnerMention $OwnerId
+        $iv = Get-InterventionOutcome -Results $healOutcome.Results -PrevFailed $failedBeforeAction -Mode 'heal' -OwnerMention $OwnerId -Baselines $durationMap
         Write-Log ("[HEAL] intervention kind={0} claim={1} probed={2}/{3}" -f $iv.Kind, $iv.ClaimSuccess, $iv.Probed, $iv.Total)
         $hr = Send-WatchdogNotice -Text $iv.Text -AlertCfg $alertCfg -WouldSend $true
         if ($hr.Sent) { $alertSent = $true }
@@ -1587,13 +2160,15 @@ if ($newStatus -eq 'FAIL') {
         }
       }
     }
+  } elseif ($action -eq 'observe') {
+    Write-Log '[ACTION] observe — same-round slow peers suggest VM-level stall; skip container restart (cannot fix 9p)'
   } elseif ($action -eq 'restart-failed') {
     if ($failed.Count -eq 0) {
       Write-Log '[ACTION] restart-failed skipped (no mount-fail rows)'
     } else {
       $again = Invoke-ContainerRestart $failed
       if ($again.Count -gt 0) {
-        $iv = Get-InterventionOutcome -Results $again -PrevFailed $failedBeforeAction -Mode 'restart' -OwnerMention $OwnerId
+        $iv = Get-InterventionOutcome -Results $again -PrevFailed $failedBeforeAction -Mode 'restart' -OwnerMention $OwnerId -Baselines $durationMap
         Write-Log ("[FIX] intervention kind={0} claim={1} probed={2}/{3}" -f $iv.Kind, $iv.ClaimSuccess, $iv.Probed, $iv.Total)
         $tier1 = $again
         $decision = $iv.Decision
@@ -1664,6 +2239,7 @@ $newState = [pscustomobject]@{
   lastAllDownAlertAt  = $state.lastAllDownAlertAt
   discordFailCount    = [int]$script:WatchdogFailCount
   lastDiscordError    = $script:WatchdogLastError
+  probeDurations      = (Update-ProbeDurationMap $durationMap $tier1 $BaselineWindow)
 }
 if ($failed.Count -gt 0) {
   foreach ($f in $failed) {
