@@ -5,6 +5,11 @@
 1. 一般文章：Cloudflare Browser Run 的
    `/markdown?browser=kitesurf` 遠端渲染 → Jina Reader。URL intake 預設不
    使用本機 Steel／Chromium。
+   任何一段擷取結果若被判定為反機器人阻擋頁（`looks_blocked()`：4000 字以內
+   且含 Cloudflare／challenge 特徵字串），一律捨棄不計入正文長度，讓後續退路
+   繼續執行。阻擋頁通常有 500–900 字，會誤過長度門檻——2026-08-28
+   techorange.com 那次就是 KiteSurf 回傳 851 字阻擋頁，Jina 因此從未被呼叫，
+   最後把阻擋頁本身整理成筆記。
 2. X／Twitter status：優先走 FxTwitter（`api.fxtwitter.com`），可取得貼文
    正文與內嵌 X Article；失敗才退 KiteSurf／Jina。
 3. YouTube：官方字幕（繁中優先、人工字幕優先）→ 任意語言字幕 →

@@ -63,6 +63,28 @@ NVIDIA_FINAL_FALLBACK_TIMEOUT = int(
 GROQ_KEY = os.environ.get("GROQ_API_KEY", "")
 MAX_SOURCE_CHARS = int(os.environ.get("MAX_SOURCE_CHARS", "90000"))
 MAX_DOWNLOAD_BYTES = int(os.environ.get("MAX_DOWNLOAD_BYTES", str(30 * 1024 * 1024)))
+MIN_BODY_CHARS = int(os.environ.get("MIN_BODY_CHARS", "300"))
+# Anti-bot walls come back as HTTP 200 with a few hundred characters of prose.
+# They are long enough to pass a naive length check, so they must be recognised
+# and discarded explicitly, otherwise the fallback chain never runs.
+BLOCK_PAGE_MAX_CHARS = int(os.environ.get("BLOCK_PAGE_MAX_CHARS", "4000"))
+BLOCK_PAGE_MARKERS = (
+    "sorry, you have been blocked",
+    "attention required! | cloudflare",
+    "you are unable to access",
+    "checking your browser before accessing",
+    "enable javascript and cookies to continue",
+    "verifying you are human",
+    "just a moment...",
+    "please enable cookies",
+    "cloudflare ray id",
+    "performance & security by cloudflare",
+    "error 1015",
+    "error 1020",
+    "access denied",
+    "請啟用 cookie",
+    "您的請求已遭封鎖",
+)
 
 URL_RE = re.compile(r"https?://[^\s<>()\[\]{}\"'，。！？；：、]+", re.IGNORECASE)
 YT_RE = re.compile(
@@ -375,6 +397,20 @@ def pdf_text(url: str) -> str:
         return "\n\n".join((page.extract_text() or "").strip() for page in reader.pages).strip()
 
 
+def looks_blocked(text: str) -> bool:
+    """True when a scraper returned an anti-bot wall instead of the article.
+
+    Only short documents are considered: a real article that merely mentions
+    Cloudflare stays far above the size of a challenge page.
+    """
+    if not text:
+        return False
+    if len(text) > BLOCK_PAGE_MAX_CHARS:
+        return False
+    low = text.lower()
+    return any(marker in low for marker in BLOCK_PAGE_MARKERS)
+
+
 def source_text(url: str) -> tuple[str, str]:
     ensure_public_url(url)
     video_id = youtube_id(url)
@@ -393,43 +429,44 @@ def source_text(url: str) -> tuple[str, str]:
 
     text = ""
     errors: list[str] = []
+
+    def take(label: str, scraped: str) -> None:
+        """Keep the longest body seen so far; a block page never counts as one."""
+        nonlocal text
+        if looks_blocked(scraped):
+            errors.append(f"{label}: 反機器人阻擋頁（{len(scraped)} 字，已捨棄）")
+            return
+        if len(scraped) > len(text):
+            text = scraped
+
     # X/Twitter: browser scrapers and Jina are often blocked or login-walled.
     # FxTwitter exposes status text and embedded Articles without a local browser.
     if is_x_host(host) and x_status_id(url):
         try:
-            text = fxtwitter_scrape(url)
+            take("FxTwitter", fxtwitter_scrape(url))
             if len(text) >= 120:
                 return "x", text
         except Exception as exc:  # noqa: BLE001
             errors.append(f"FxTwitter: {exc}")
     # Remote browser next: no local Chromium CPU/RAM is consumed.
     try:
-        scraped = kitesurf_scrape(url)
-        if len(scraped) > len(text):
-            text = scraped
+        take("KiteSurf", kitesurf_scrape(url))
     except Exception as exc:  # noqa: BLE001
         errors.append(f"KiteSurf: {exc}")
-    if len(text) < 300 and is_x_host(host):
+    # Jina reaches the origin from a different network than Kitesurf, so it
+    # routinely succeeds on sites that refuse Cloudflare's rendering egress.
+    if len(text) < MIN_BODY_CHARS:
         try:
-            fallback = jina_scrape(url)
-            if len(fallback) > len(text):
-                text = fallback
-        except Exception as exc:  # noqa: BLE001
-            errors.append(f"X fallback: {exc}")
-    if len(text) < 300 and ALLOW_STEEL_FALLBACK:
-        try:
-            scraped = steel_scrape(url)
-            if len(scraped) > len(text):
-                text = scraped
-        except Exception as exc:  # noqa: BLE001
-            errors.append(f"Steel: {exc}")
-    if len(text) < 300:
-        try:
-            fallback = jina_scrape(url)
-            if len(fallback) > len(text):
-                text = fallback
+            take("Jina", jina_scrape(url))
         except Exception as exc:  # noqa: BLE001
             errors.append(f"Jina: {exc}")
+    # Local browser is the last resort: it costs CPU/RAM but exits from this
+    # machine's own address, which is the only path left when both remotes fail.
+    if len(text) < MIN_BODY_CHARS and ALLOW_STEEL_FALLBACK:
+        try:
+            take("Steel", steel_scrape(url))
+        except Exception as exc:  # noqa: BLE001
+            errors.append(f"Steel: {exc}")
     if len(text) < 120:
         try:
             transcript = media_transcript(url)

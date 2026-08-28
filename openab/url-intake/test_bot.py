@@ -93,6 +93,51 @@ class UrlIntakeTests(unittest.TestCase):
         kite.assert_not_called()
         jina.assert_not_called()
 
+    def test_looks_blocked_detects_cloudflare_wall(self):
+        # Verbatim shape of what Kitesurf returned for techorange.com on
+        # 2026-08-28: HTTP 200, success=true, 851 characters, no article.
+        wall = (
+            "---\ntitle: \"Attention Required! | Cloudflare\"\n---\n\nPlease "
+            "enable cookies.\n\n# Sorry, you have been blocked\n\n## You are "
+            "unable to access techorange.com\n\n## Why have I been "
+            "blocked?\n\nThis website is using a security service to protect "
+            "itself from online attacks. The action you just performed triggered "
+            "the security solution. There are several actions that could trigger "
+            "this block including submitting a certain word or phrase, a SQL "
+            "command or malformed data.\n\n## What can I do to resolve "
+            "this?\n\nYou can email the site owner to let them know you were "
+            "blocked. Please include what you were doing when this page came up "
+            "and the Cloudflare Ray ID found at the bottom of this "
+            "page.\n\nCloudflare Ray ID: **a321e773ccae4a63** \u2022 Your IP: "
+            "Click to reveal 2a06:98c0:3600::103 \u2022 Performance & security by"
+            " [Cloudflare](https://www.cloudflare.com/5xx-error-landing)"
+        )
+        self.assertTrue(BOT.looks_blocked(wall))
+        self.assertGreater(len(wall), 300)
+
+    def test_looks_blocked_ignores_long_article_mentioning_cloudflare(self):
+        article = "本文說明 Cloudflare Ray ID 的用途。" + "內容" * 3000
+        self.assertFalse(BOT.looks_blocked(article))
+        self.assertFalse(BOT.looks_blocked(""))
+
+    def test_source_text_falls_through_when_kitesurf_returns_block_page(self):
+        wall = (
+            "# Sorry, you have been blocked\n\n"
+            "## You are unable to access techorange.com\n" + "x" * 400
+        )
+        article = "真正的文章內容。" * 200
+        with (
+            patch.object(BOT, "ensure_public_url"),
+            patch.object(BOT, "kitesurf_scrape", return_value=wall) as kite,
+            patch.object(BOT, "jina_scrape", return_value=article) as jina,
+        ):
+            kind, text = BOT.source_text("https://techorange.com/2026/08/28/post/")
+        kite.assert_called_once()
+        jina.assert_called_once()
+        self.assertEqual(kind, "webpage")
+        self.assertEqual(text, article)
+        self.assertNotIn("blocked", text)
+
     def test_parse_json_response_accepts_fence(self):
         data = BOT.parse_json_response(
             '```json\n{"title":"T","summary":"S","key_points":["K"]}\n```'
