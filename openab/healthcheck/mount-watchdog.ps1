@@ -54,6 +54,12 @@ $LogMaxBytes = 5MB
 # FIX-M0：耗時基線。K/M 只增加資訊與保守性，不降低自癒門檻。
 $SlowMultiple = 5
 $SlowPeerMin = 2
+# A2：同一輪內有這麼多「不同容器」的掛載逾時，本身就足以判 VM 層級。
+# 一個容器的多條掛載一起壞可以是那個容器的問題；兩個不同容器同時壞不行。
+$MultiContainerFailMin = 2
+# docker inspect 的逾時。Invoke-Cmd 逾時回 124，必須與「容器真的不存在」
+# （inspect 回非 0）分開處理，否則探測逾時會被誤報成 container absent。
+$InspectTimeoutSec = 10
 $DefaultBaselineSec = 0.5
 $BaselineWindow = 12
 
@@ -187,6 +193,10 @@ function Get-MountVerdict {
     [int]$ExecExit,
     [string]$ExecOut
   )
+  # 124 = Invoke-Cmd 自己殺掉逾時的 docker inspect。這不代表容器不存在，
+  # 只代表 docker 當下很慢——正是 VM 劣化的徵兆。若併入 absent，該掛載會被
+  # SKIP、不計入 probed、也不計入劣化證據，監控會在最需要的時候縮小涵蓋範圍。
+  if ($InspectExit -eq 124) { return 'probe-timeout' }
   if ($InspectExit -ne 0) { return 'absent' }
   $running = ''
   if ($null -ne $RunningRaw) { $running = $RunningRaw.Trim().ToLower() }
@@ -318,8 +328,14 @@ function Get-ProbeLatencyAssessment {
   $map = Convert-DurationMap $Baselines
   $timeouts = @()
   $slowPeers = @()
+  $probeTimeouts = @()
   foreach ($r in (Convert-ToArray $Results)) {
     if ($null -eq $r) { continue }
+    if ($r.Verdict -eq 'probe-timeout') {
+      # docker inspect 逾時：掛載狀態未知，但「慢」這件事是確定的證據。
+      $probeTimeouts += $r
+      continue
+    }
     if (Test-ProbeTimeout $r) {
       $timeouts += $r
       continue
@@ -337,13 +353,25 @@ function Get-ProbeLatencyAssessment {
     if ($dur -ge ([double]$SlowMultiple * $base)) { $slowPeers += $r }
   }
   $peerCount = @($slowPeers).Count
-  $vm = (($timeouts.Count -gt 0) -and ($peerCount -ge [int]$SlowPeerMin))
+  $ptCount = @($probeTimeouts).Count
+  # A2：逾時的掛載分屬幾個不同容器。單一容器的多條掛載不算。
+  $failHosts = @{}
+  foreach ($t in (Convert-ToArray $timeouts)) {
+    if ($null -eq $t -or $null -eq $t.Container) { continue }
+    $failHosts[[string]$t.Container] = $true
+  }
+  $failHostCount = @($failHosts.Keys).Count
+  $multiHost = ($failHostCount -ge [int]$MultiContainerFailMin)
+  $vm = (($timeouts.Count -gt 0) -and ((($peerCount + $ptCount) -ge [int]$SlowPeerMin) -or $multiHost))
   return [pscustomobject]@{
-    HasTimeout    = ($timeouts.Count -gt 0)
-    SlowPeerCount = $peerCount
-    SlowPeers     = ,$slowPeers
-    Timeouts      = ,$timeouts
-    VmDegraded    = $vm
+    HasTimeout        = ($timeouts.Count -gt 0)
+    SlowPeerCount     = $peerCount
+    SlowPeers         = ,$slowPeers
+    ProbeTimeoutCount = $ptCount
+    Timeouts          = ,$timeouts
+    FailContainerCount = $failHostCount
+    MultiContainerFail = $multiHost
+    VmDegraded        = $vm
   }
 }
 
@@ -352,7 +380,16 @@ function Format-VmDegradedNote {
   if ($null -eq $Decision) { return '' }
   if (-not [bool]$Decision.VmDegraded) { return '' }
   $n = [int]$Decision.SlowPeerCount
-  return ('同一輪內另有 {0} 條掛載異常緩慢，可能是 VM 層級劣化而非單一容器問題' -f $n)
+  $pt = [int]$Decision.ProbeTimeoutCount
+  $fc = [int]$Decision.FailContainerCount
+  # 每個成立的訊號才寫進句子。VmDegraded 可能只由 A2 成立（SlowPeerCount=0），
+  # 那時舊句子會寫成「另有 0 條」——是假話，所以逐項組。
+  $parts = @()
+  if ($n -ge 1) { $parts += ('另有 {0} 條掛載異常緩慢' -f $n) }
+  if ($pt -ge 1) { $parts += ('有 {0} 條探測逾時' -f $pt) }
+  if ($fc -ge [int]$MultiContainerFailMin) { $parts += ('有 {0} 個不同容器同時掛載逾時' -f $fc) }
+  if (@($parts).Count -eq 0) { return '' }
+  return ('同一輪內' + ($parts -join '、') + '，可能是 VM 層級劣化而非單一容器問題')
 }
 
 function Add-VmDegradedNotice {
@@ -373,11 +410,15 @@ function Get-ProbeRunDecision {
   $lat = Get-ProbeLatencyAssessment -Results $Results -Baselines $Baselines
   $vm = [bool]$lat.VmDegraded
   $peerN = [int]$lat.SlowPeerCount
+  $ptN = [int]$lat.ProbeTimeoutCount
+  $fcN = [int]$lat.FailContainerCount
+  $multi = [bool]$lat.MultiContainerFail
   if ($failed.Count -gt 0) {
     return [pscustomobject]@{
       Status = 'FAIL'; NeedTier2 = $true; Probed = $probed
       ClearLatch = $false; AllowRecovered = $false; Reason = 'mount-fail'
       VmDegraded = $vm; SlowPeerCount = $peerN
+      ProbeTimeoutCount = $ptN; FailContainerCount = $fcN; MultiContainerFail = $multi
     }
   }
   if ($probed -eq 0) {
@@ -385,12 +426,14 @@ function Get-ProbeRunDecision {
       Status = 'FAIL'; NeedTier2 = $true; Probed = 0
       ClearLatch = $false; AllowRecovered = $false; Reason = 'unprobed'
       VmDegraded = $false; SlowPeerCount = 0
+      ProbeTimeoutCount = $ptN; FailContainerCount = $fcN; MultiContainerFail = $false
     }
   }
   return [pscustomobject]@{
     Status = 'OK'; NeedTier2 = $false; Probed = $probed
     ClearLatch = $true; AllowRecovered = $true; Reason = 'ok'
     VmDegraded = $false; SlowPeerCount = $peerN
+    ProbeTimeoutCount = $ptN; FailContainerCount = $fcN; MultiContainerFail = $false
   }
 }
 
@@ -1349,6 +1392,68 @@ drwxr-xr-x 1 root root  512 Aug 27 00:00 e
   Assert-True ($note -match '同一輪內另有 \d+ 條掛載異常緩慢，可能是 VM 層級劣化而非單一容器問題') 'alert note uses the required VM-suspicion sentence'
   Assert-True ((Format-VmDegradedNote $decNormal) -eq '') 'OK round has no VM-suspicion sentence'
 
+  # ── FIX-A1：docker inspect 逾時不是「容器不存在」 ────────────────────
+  Assert-Eq (Get-MountVerdict -InspectExit 124 -RunningRaw '' -ExecExit 0 -ExecOut '') 'probe-timeout' 'inspect exit=124 => probe-timeout'
+  Assert-True ((Get-MountVerdict -InspectExit 124 -RunningRaw '' -ExecExit 0 -ExecOut '') -ne 'absent') 'inspect timeout must never be reported as absent'
+  $ptRows = @(
+    [pscustomobject]@{ Container = 'a'; Path = '/x'; Verdict = 'ok'; DurationSec = 0.17; Detail = 'OK' },
+    [pscustomobject]@{ Container = 'b'; Path = '/y'; Verdict = 'probe-timeout'; DurationSec = 10.0; Detail = 'docker inspect timeout (10s)' }
+  )
+  Assert-Eq (Get-ProbedCount $ptRows) 1 'probe-timeout is not a completed probe'
+  $ptFail = Get-MountFailResults $ptRows
+  Assert-Eq $ptFail.Count 0 'probe-timeout is not a mount failure'
+
+  # ── FIX-A2：同輪 2 個不同容器逾時本身即 VM 層級 ──────────────────────
+  # 2026-08-30 00:58 真實一輪：兩條 FAIL、兩條被誤報為 container absent。
+  $round0058 = @(
+    [pscustomobject]@{ Container = 'openab-url-intake'; Path = '/vault'; Verdict = 'mount-fail'; DurationSec = 15.71; Detail = 'timeout ls /vault (exit 124)' },
+    [pscustomobject]@{ Container = 'intake-publisher'; Path = '/vault'; Verdict = 'probe-timeout'; DurationSec = 10.04; Detail = 'docker inspect timeout (10s)' },
+    [pscustomobject]@{ Container = 'pdf-publisher'; Path = '/vault'; Verdict = 'mount-fail'; DurationSec = 17.39; Detail = 'timeout ls /vault (exit 124)' },
+    [pscustomobject]@{ Container = 'openab-estate'; Path = '/workspace/EstateSpace'; Verdict = 'probe-timeout'; DurationSec = 10.02; Detail = 'docker inspect timeout (10s)' },
+    [pscustomobject]@{ Container = 'openab-travel-claude'; Path = '/workspace/TravelMemory'; Verdict = 'ok'; DurationSec = 1.38; Detail = 'OK' },
+    [pscustomobject]@{ Container = 'openab-travel-nvidia'; Path = '/workspace/TravelMemory'; Verdict = 'ok'; DurationSec = 0.20; Detail = 'OK' },
+    [pscustomobject]@{ Container = 'openab-credit-report'; Path = '/workspace/CreditReportSpace'; Verdict = 'ok'; DurationSec = 0.21; Detail = 'OK' },
+    [pscustomobject]@{ Container = 'openab-kiro'; Path = '/workspace/KiroSpace'; Verdict = 'ok'; DurationSec = 0.19; Detail = 'OK' },
+    [pscustomobject]@{ Container = 'openab-astruct'; Path = '/workspace/AStructSpace'; Verdict = 'ok'; DurationSec = 0.20; Detail = 'OK' }
+  )
+  $base0058 = @{}
+  foreach ($row in $round0058) { $base0058[('{0}:{1}' -f $row.Container, $row.Path)] = @(0.17, 0.18, 0.17) }
+  $dec0058 = Get-ProbeRunDecision $round0058 $base0058
+  Assert-Eq $dec0058.Status 'FAIL' '00:58 round is a failure round'
+  Assert-Eq ([int]$dec0058.ProbeTimeoutCount) 2 '00:58 has two docker-inspect timeouts'
+  Assert-Eq ([int]$dec0058.FailContainerCount) 2 '00:58 mount timeouts span two distinct containers'
+  Assert-True $dec0058.MultiContainerFail '00:58 satisfies the multi-container rule'
+  Assert-True $dec0058.VmDegraded '00:58 is VM-level, not container-level'
+  Assert-Eq (Get-ScopeAction 'container' -VmDegraded $dec0058.VmDegraded) 'observe' '00:58 must observe, not restart two containers'
+  Assert-Eq (Get-ProbedCount $round0058) 7 '00:58 coverage is 7/9, and says so'
+
+  # A2 單獨成立：完全沒有慢鄰居、沒有探測逾時，只有兩個容器逾時
+  $twoHostOnly = @(
+    [pscustomobject]@{ Container = 'a'; Path = '/x'; Verdict = 'mount-fail'; DurationSec = 15.0; Detail = 'timeout ls /x (exit 124)' },
+    [pscustomobject]@{ Container = 'b'; Path = '/y'; Verdict = 'mount-fail'; DurationSec = 15.0; Detail = 'timeout ls /y (exit 124)' },
+    [pscustomobject]@{ Container = 'c'; Path = '/z'; Verdict = 'ok'; DurationSec = 0.17; Detail = 'OK' }
+  )
+  $baseTwo = @{ 'a:/x' = @(0.17); 'b:/y' = @(0.17); 'c:/z' = @(0.17) }
+  $decTwo = Get-ProbeRunDecision $twoHostOnly $baseTwo
+  Assert-Eq ([int]$decTwo.SlowPeerCount) 0 'two-host fixture has no slow peers'
+  Assert-Eq ([int]$decTwo.ProbeTimeoutCount) 0 'two-host fixture has no probe timeouts'
+  Assert-True $decTwo.VmDegraded 'two distinct containers timing out is VM-level on its own'
+  $noteTwo = Format-VmDegradedNote $decTwo
+  Assert-True ($noteTwo -match '2 個不同容器同時掛載逾時') 'note states the multi-container reason'
+  Assert-True ($noteTwo -notmatch '另有 0 條') 'note never claims zero slow peers'
+
+  # 反例：同一個容器的兩條掛載一起壞，不得升級為 VM 層級
+  $oneHostTwoMounts = @(
+    [pscustomobject]@{ Container = 'a'; Path = '/x'; Verdict = 'mount-fail'; DurationSec = 15.0; Detail = 'timeout ls /x (exit 124)' },
+    [pscustomobject]@{ Container = 'a'; Path = '/y'; Verdict = 'mount-fail'; DurationSec = 15.0; Detail = 'timeout ls /y (exit 124)' },
+    [pscustomobject]@{ Container = 'c'; Path = '/z'; Verdict = 'ok'; DurationSec = 0.17; Detail = 'OK' }
+  )
+  $decOne = Get-ProbeRunDecision $oneHostTwoMounts @{ 'a:/x' = @(0.17); 'a:/y' = @(0.17); 'c:/z' = @(0.17) }
+  Assert-Eq ([int]$decOne.FailContainerCount) 1 'two mounts of one container is one container'
+  Assert-True (-not $decOne.MultiContainerFail) 'one container never satisfies the multi-container rule'
+  Assert-True (-not $decOne.VmDegraded) 'one container failing stays container-level'
+  Assert-Eq (Get-ScopeAction 'container' -VmDegraded $decOne.VmDegraded) 'restart-failed' 'single-container failure still restarts'
+
   # 同一判定必須同時作用於主流程與自癒／重啟（Get-InterventionOutcome 走同一份 Get-ProbeRunDecision）
   $ivHealM0 = Get-InterventionOutcome -Results $incident2056 -PrevFailed $incident2056 -Mode 'heal' -OwnerMention 'OWNER' -Baselines $base017
   $ivRestartM0 = Get-InterventionOutcome -Results $incident2056 -PrevFailed $incident2056 -Mode 'restart' -OwnerMention 'OWNER' -Baselines $base017
@@ -1420,6 +1525,9 @@ drwxr-xr-x 1 root root  512 Aug 27 00:00 e
   # pattern 用拼接的，否則字串本身會在原始碼裡被自己數進去。
   $discordExitPattern = 'Send-Discord' + 'Alert -Token'
   Assert-Eq (([regex]::Matches($src, $discordExitPattern)).Count) 2 'exactly two Discord call sites'
+  # probe-timeout 只能有一個產生點，否則「逾時」與「不存在」會再度混在一起
+  $ptPattern = 'return ' + "'" + 'probe-timeout' + "'"
+  Assert-Eq (([regex]::Matches($src, [regex]::Escape($ptPattern))).Count) 1 'exactly one place produces probe-timeout'
   Assert-Eq ([regex]::Matches($src, 'function Get-ProbeRunDecision \{')).Count 1 'exactly one Get-ProbeRunDecision (no second judge)'
   Assert-Eq ([regex]::Matches($src, 'function Get-VmRecycleDecision \{')).Count 1 'exactly one Get-VmRecycleDecision (no second recycle judge)'
   Assert-True ($src -match 'Get-ScopeAction -Scope \$scope -VmDegraded') 'main passes VmDegraded into Get-ScopeAction'
@@ -1624,7 +1732,7 @@ function Invoke-Tier1Probe {
     $c = $m.Container
     $p = $m.Path
     $t0 = Get-Date
-    $insp = Invoke-Cmd 'docker' @('inspect', '-f', '{{.State.Running}}', $c) 10
+    $insp = Invoke-Cmd 'docker' @('inspect', '-f', '{{.State.Running}}', $c) $InspectTimeoutSec
     $execExit = 0
     $execOut = ''
     $execErr = ''
@@ -1643,10 +1751,12 @@ function Invoke-Tier1Probe {
     if ($detail -eq '') { $detail = ($execErr).Trim() }
     if ($verdict -eq 'absent') { $detail = 'container absent' }
     if ($verdict -eq 'stopped') { $detail = 'not running' }
+    if ($verdict -eq 'probe-timeout') { $detail = "docker inspect timeout (${InspectTimeoutSec}s)" }
     if ($execExit -eq 124) { $detail = "timeout ls $p (exit 124)" }
     $label = 'FAIL'
     if ($verdict -eq 'ok') { $label = 'OK' }
     if ($verdict -eq 'stopped' -or $verdict -eq 'absent') { $label = 'SKIP' }
+    if ($verdict -eq 'probe-timeout') { $label = 'TIMEOUT' }
     $durLabel = Format-ProbeDurationSec $durationSec
     Write-Log ("[T1] {0} {1} => {2} ({3}) {4}" -f $c, $p, $label, $detail, $durLabel)
     # Verdict 是唯一判定欄位。不再寫 Ok（舊欄位無人讀，避免被當成狀態機依據）。
