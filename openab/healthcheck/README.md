@@ -270,3 +270,76 @@ healthcheck 用 `grep -qa '/app/bot.py' /proc/1/cmdline`（或 publish.py）加�
 當成全掛（第一次 `-DryRun` 就是這樣炸的）。`Write-Log` 改走 `Write-Host` +
 `.state` log 檔。結果物件**只有 `Verdict`**，沒有 `Ok` 欄位。
 
+
+---
+
+# WSLg 追蹤檔清理（wslg-trace-cleanup，2026-08-31）
+
+## 為什麼有這東西
+
+`%LOCALAPPDATA%\Temp\DiagOutputDir\RdClientAutoTrace` 在 2026-08-31 量到
+**4748 個檔、42 GB**，佔掉 C: 當時剩餘空間的一半。
+
+寫入者不是遠端桌面，是 **WSLg**：
+
+```
+msrdc.exe /wslg /silent /v:8C2CB12A-... /plugin:WSLDVC_PACKAGE
+   父程序 wslhost.exe --vm-id {8c2cb12a-...}     ← WSL utility VM
+```
+
+msrdc 一啟動就開 WPP autotrace，速率固定 **每分鐘一個約 8.9 MB 的 .etl**，
+跟容器在做什麼無關（實測每 UTC 日 1429 / 1648 / 1597 個檔 ≈ 1440 = 一天的分鐘數，
+約 12.4～14.3 GB/day）。
+
+**跟本專案的關係要講清楚**：專案裡沒有任何東西用到 WSLg（容器全是 headless，
+Steel 的 Chromium 跑在容器內），這些檔案記的是 RDP 壓縮、鍵盤映射、音訊 sink
+那類 WSLg 內部事件。但本專案要 Docker Desktop 24 小時掛著，WSL VM 就永遠不關，
+msrdc 也就永遠不關 —— **專案是它「停不下來」的原因，不是它「產生」的原因**。
+
+## 為什麼不直接關掉 WSLg
+
+`.wslconfig` 的 `guiApplications=false` 可以讓 msrdc 完全不啟動，追蹤檔歸零。
+**不採用**：那是全機器設定，會連帶讓其他專案不能從 WSL 開 Linux GUI 程式。
+為了本專案的磁碟去砍掉整台機器的能力，代價擺錯地方。
+
+msrdc 也沒有任何原生的保留上限可設。2026-08-31 查過
+`HKCU\Software\Microsoft\Terminal Server Client`、`RdClientRadc`、`MSRDC`
+與 HKLM 的 Terminal Services 原則，全域搜尋 `AutoTrace` 也是零筆。
+而且 **msrdc 重啟不清舊檔**（08-30 13:11 重啟過，08-27 的檔案仍在），
+要當成無上限成長處理。所以只能排程刪。
+
+## 用法
+
+```powershell
+.\wslg-trace-cleanup.ps1 -WhatIf              # 只看會刪幾個
+.\wslg-trace-cleanup.ps1                      # 保留 24 小時內的
+.\wslg-trace-cleanup.ps1 -RetentionHours 6    # 想壓更小就調這個
+
+.\register-wslg-trace-cleanup.ps1 -WhatIf     # 看排程內容
+.\register-wslg-trace-cleanup.ps1             # 註冊 OpenAB-WslgTraceCleanup（每小時）
+```
+
+保留 **24 小時** → 穩態約 **12.8 GB**（每小時約 534 MB）。
+
+為什麼不是 6 小時：08-27 那次掛載崩潰是隔了 9 小時才被發現的。
+保留窗口必須撐得過「晚上出事、隔天早上才查」，否則排程等於在事故現場
+先把證據清掉。6 小時穩態只要 3.3 GB，但那個窗口接不住實際的發現延遲。
+
+## 安全設計
+
+- **只刪 `RdClientAutoTrace-*.etl`。** `MSRDCEventProcessor_*.etl` 是 msrdc 自己
+  輪替的小環狀檔（各 4 KB、持續開著），不在範圍內 —— dry-run 驗過零命中。
+- **路徑保險絲**：解析出來的目錄必須以 `DiagOutputDir\RdClientAutoTrace` 結尾才動手。
+  `LOCALAPPDATA` 是空的就直接中止，不猜路徑 —— 避免對錯的目錄下 `Remove-Item -Force`。
+- **鎖住不算失敗**：正在寫入的那個檔會鎖住，計入 `locked`，下一輪自然清掉。
+- **日誌自己也有上限**（超過 256 KB 只留最後 200 行），否則就變成第二個同類問題。
+
+## 首次執行實測（2026-08-31）
+
+```
+2026-08-31 09:08:56  deleted=4363 locked=0 freed=37.86 GB remain=392 個 / 3.35 GB (retention=6h)
+2026-08-31 09:09:47  deleted=1 locked=0 freed=8.5 MB remain=393 個 / 3.35 GB (retention=6h)
+```
+
+4363 個檔 4.8 秒刪完、零鎖定。第二行是排程觸發跑的，`LastTaskResult=0`，
+證明 `run-hidden.vbs → powershell.exe` 那條鏈與 exit code 回傳都正常。
