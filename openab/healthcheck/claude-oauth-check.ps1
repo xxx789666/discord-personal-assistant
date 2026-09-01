@@ -102,7 +102,14 @@ try {
 
 # 偵測「是否已切換到長效訂閱 token」——讀掛進容器的 config.toml，找未註解的
 # 注入行，取出它引用的 ${VAR} 名字，再確認該變數有值且不是佔位字串。
+# ⚠ 2026-08-31：config.toml 是 bind mount。9p 掛載崩潰時讀它會回 EIO，而舊版的
+#    `2>/dev/null` 把錯誤吞掉、grep 回空字串 → 判成 NO → 退回去讀遷移前就過期的
+#    .credentials.json → 對一隻其實正常運作的 bot 發出「token 過期」告警。
+#    （實例：10:53 USB 碟被拔導致 9p 全崩，11:07 就送出這種假告警。）
+#    所以「讀不到」必須跟「檔案裡沒這行」分開，不能共用 NO。
+#    用實際讀一個位元組來判定——EIO 時 stat 也會失敗，[ -r ] 不夠明確。
 $DetectEnvToken = @'
+if ! head -c 1 /etc/openab/config.toml >/dev/null 2>&1; then echo UNREADABLE; exit 0; fi
 line=$(grep -E "^[[:space:]]*env[[:space:]]*=.*CLAUDE_CODE_OAUTH_TOKEN" /etc/openab/config.toml 2>/dev/null | head -1)
 if [ -z "$line" ]; then echo NO; exit 0; fi
 var=$(echo "$line" | sed -n 's/.*${\([A-Za-z_][A-Za-z0-9_]*\)}.*/\1/p')
@@ -143,7 +150,16 @@ foreach ($t in $Targets) {
     #     容器自己的 env 只有 env_file 裡那個帶後綴的名字。所以改成讀 config.toml
     #     有沒有未註解的注入行，再確認它引用的變數確實有值。
     $detect = Invoke-Cmd 'docker' @('exec', $name, 'sh', '-c', $DetectEnvToken) 30
-    $usingEnvToken = (($detect.Out).Trim() -eq 'YES')
+    $detectOut = ($detect.Out).Trim()
+    $usingEnvToken = ($detectOut -eq 'YES')
+
+    # config.toml 讀不到 = 掛載故障，不是認證故障。這裡直接跳過，不要退回憑證檔
+    # 檢查——那會拿遷移前的殘留憑證產生假告警。掛載本身由 mount-watchdog 負責。
+    # 刻意不動節流狀態檔：若先前有真故障被節流，不該因為這次跳過就被清掉。
+    if ($detectOut -eq 'UNREADABLE') {
+      Write-Output "[SKIP] $name config.toml 不可讀（掛載故障？）——略過認證檢查，交給 mount-watchdog"
+      continue
+    }
 
     if ($usingEnvToken) {
       Write-Output "[NOTE] $name 走長效訂閱 token（環境變數），略過憑證檔檢查"
