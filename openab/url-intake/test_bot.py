@@ -350,7 +350,7 @@ class UrlIntakeTests(unittest.TestCase):
         original_fallback = BOT.NVIDIA_FALLBACK_MODEL
         original_final_fallback = BOT.NVIDIA_FINAL_FALLBACK_MODEL
         BOT.NVIDIA_MODEL = "primary/model"
-        BOT.NVIDIA_FALLBACK_MODEL = "nvidia/nemotron-3-nano-30b-a3b"
+        BOT.NVIDIA_FALLBACK_MODEL = "nvidia/nemotron-3.5-lightning-30b-a3b"
         BOT.NVIDIA_FINAL_FALLBACK_MODEL = "nvidia/nemotron-3-super-120b-a12b"
         gateway_timeout = Mock(status_code=504)
         gateway_timeout.raise_for_status.side_effect = BOT.requests.exceptions.HTTPError(
@@ -381,7 +381,13 @@ class UrlIntakeTests(unittest.TestCase):
         self.assertEqual(post.call_args_list[0].kwargs["json"]["model"], "primary/model")
         self.assertEqual(
             post.call_args_list[1].kwargs["json"]["model"],
-            "nvidia/nemotron-3-nano-30b-a3b",
+            "nvidia/nemotron-3.5-lightning-30b-a3b",
+        )
+        # The 3.5 series id reads "nemotron-3.5-", so a "nvidia/nemotron-3-"
+        # prefix test misses it and leaves reasoning output switched on.
+        self.assertEqual(
+            post.call_args_list[1].kwargs["json"]["chat_template_kwargs"],
+            {"enable_thinking": False},
         )
 
     def test_summarize_uses_source_only_fallback_when_all_models_fail(self):
@@ -413,6 +419,41 @@ class UrlIntakeTests(unittest.TestCase):
         self.assertTrue(result["_source_only"])
         self.assertEqual(post.call_count, 3)
         self.assertIn("所有摘要模型暫時不可用", result["caveats"][0])
+
+    def test_source_only_salvages_single_line_transcript(self):
+        # 2026-09-07: youtube_captions() joins every cue with a space, so a
+        # whole video is ONE line. The old 12..500 filter dropped all 4808
+        # characters and the note read as if nothing had been extracted.
+        caption = "這集要講的一個關鍵觀念 我們先從第一個部分說起 " * 200
+        self.assertNotIn("\n", caption)
+        self.assertGreater(len(caption), 4000)
+        result = BOT.source_only_summary("youtube", caption, ["m: ReadTimeout"])
+        self.assertNotEqual(result["title"], "youtube 來源暫存")
+        self.assertTrue(result["key_points"])
+        self.assertIn("原文節錄", result["details_md"])
+        self.assertIn("這集要講的一個關鍵觀念", result["details_md"])
+
+    def test_split_long_line_hard_wraps_unpunctuated_text(self):
+        # Auto-generated captions can run for thousands of characters without
+        # a single sentence ender, so the sentence split alone is not enough.
+        pieces = BOT._split_long_line("a" * 4808)
+        self.assertEqual(len(pieces), 10)
+        self.assertLessEqual(max(len(piece) for piece in pieces), 500)
+        self.assertEqual("".join(pieces), "a" * 4808)
+        self.assertEqual(BOT._split_long_line("短句子。"), ["短句子。"])
+
+    def test_raw_excerpt_quotes_structure_breaking_source(self):
+        # A stray "---", heading or unclosed fence in the source must not be
+        # able to break the note that wraps it.
+        excerpt = BOT.raw_excerpt("---\n# 假標題\n```\n未關閉的圍籬\n正常內文。")
+        self.assertNotIn("```", excerpt)
+        body = excerpt.splitlines()[4:]
+        self.assertTrue(all(line.startswith(">") for line in body if line), body)
+
+    def test_raw_excerpt_reports_truncation(self):
+        excerpt = BOT.raw_excerpt("字" * (BOT.SOURCE_ONLY_EXCERPT_CHARS + 500))
+        self.assertIn("此處保留前", excerpt)
+        self.assertEqual(BOT.raw_excerpt("   "), "")
 
     def test_write_note_never_overwrites(self):
         meta = {"title": "測試", "summary": "摘要", "key_points": ["一"]}

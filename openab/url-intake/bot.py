@@ -50,8 +50,13 @@ ALLOW_STEEL_FALLBACK = os.environ.get("ALLOW_STEEL_FALLBACK", "false").lower() =
 NVIDIA_KEY = os.environ["NVIDIA_API_KEY"]
 NVIDIA_BASE = os.environ.get("NVIDIA_BASE_URL", "https://integrate.api.nvidia.com/v1")
 NVIDIA_MODEL = os.environ.get("NVIDIA_MODEL", "minimaxai/minimax-m3")
+# 2026-09-07：nvidia/nemotron-3-nano-30b-a3b 被 NIM 下架，呼叫回 HTTP 410
+# "has reached its end of life"，且已從 /v1/models 消失——這種錯誤永遠不會自己
+# 好，之後每次摘要都只是多花 0.2 秒空轉一個死掉的備援。這是第二次踩到 NIM 無
+# 預警下架（前一次是 kimi-k2.6），備援鏈上看到 410/404 一律當永久失效處理。
+# 同級還活著的替補目前只有 nemotron-3.5-lightning-30b-a3b（實測 200 / 0.9s）。
 NVIDIA_FALLBACK_MODEL = os.environ.get(
-    "NVIDIA_FALLBACK_MODEL", "nvidia/nemotron-3-nano-30b-a3b"
+    "NVIDIA_FALLBACK_MODEL", "nvidia/nemotron-3.5-lightning-30b-a3b"
 ).strip()
 NVIDIA_FINAL_FALLBACK_MODEL = os.environ.get(
     "NVIDIA_FINAL_FALLBACK_MODEL", "nvidia/nemotron-3-super-120b-a12b"
@@ -65,6 +70,11 @@ GROQ_KEY = os.environ.get("GROQ_API_KEY", "")
 MAX_SOURCE_CHARS = int(os.environ.get("MAX_SOURCE_CHARS", "90000"))
 MAX_DOWNLOAD_BYTES = int(os.environ.get("MAX_DOWNLOAD_BYTES", str(30 * 1024 * 1024)))
 MIN_BODY_CHARS = int(os.environ.get("MIN_BODY_CHARS", "300"))
+# How much of the raw source to quote verbatim when every model failed.
+# write_note() persists only the summary, so without this the extracted
+# text is lost the moment the LLMs are down (2026-09-07: 4808 characters
+# of captions pulled in 1.0s, then dropped on the floor).
+SOURCE_ONLY_EXCERPT_CHARS = int(os.environ.get("SOURCE_ONLY_EXCERPT_CHARS", "6000"))
 # Anti-bot walls come back as HTTP 200 with a few hundred characters of prose.
 # They are long enough to pass a naive length check, so they must be recognised
 # and discarded explicitly, otherwise the fallback chain never runs.
@@ -678,6 +688,63 @@ def to_zh_tw(value):
     return value
 
 
+def _split_long_line(line: str, limit: int = 500) -> list[str]:
+    """Break a wall-of-text line into pieces the salvage filter can keep.
+
+    youtube_captions() joins every caption cue with a single space, so an
+    entire video arrives as ONE line -- 4808 characters on 2026-09-07. The
+    12..500 length filter below then discarded all of it and the note read as
+    though nothing had been extracted, which is exactly backwards: the salvage
+    path matters most for the sources that carry no line breaks at all.
+    """
+    if len(line) <= limit:
+        return [line]
+    # No trailing \s* in the split pattern: the sentence ender stays attached
+    # to the sentence it closes and no character is dropped between pieces.
+    pieces: list[str] = []
+    buffer = ""
+    for sentence in re.split(r"(?<=[。！？；!?;…])", line):
+        if len(buffer) + len(sentence) <= limit:
+            buffer += sentence
+            continue
+        if buffer.strip():
+            pieces.append(buffer.strip())
+        buffer = sentence
+    if buffer.strip():
+        pieces.append(buffer.strip())
+    # Auto-generated captions frequently contain no punctuation whatsoever, so
+    # the sentence split can hand back one oversized piece. Hard-wrap those.
+    wrapped: list[str] = []
+    for piece in pieces:
+        while len(piece) > limit:
+            wrapped.append(piece[:limit])
+            piece = piece[limit:]
+        if piece.strip():
+            wrapped.append(piece.strip())
+    return wrapped
+
+
+def raw_excerpt(plain: str) -> str:
+    """Quote the extracted source verbatim so a model outage never loses it.
+
+    Blockquoting is not cosmetic: it stops a stray "---", "#" or code fence in
+    the source from breaking the structure of the note around it.
+    """
+    body = plain.strip()
+    if not body:
+        return ""
+    clipped = body[:SOURCE_ONLY_EXCERPT_CHARS]
+    header = "（原文節錄，未經摘要"
+    if len(body) > SOURCE_ONLY_EXCERPT_CHARS:
+        header += f"；原文共 {len(body)} 字，此處保留前 {SOURCE_ONLY_EXCERPT_CHARS} 字"
+    header += "）"
+    quoted = "\n".join(
+        "> " + re.sub(r"`{3,}", "``", line) if line.strip() else ">"
+        for line in clipped.splitlines()
+    )
+    return f"### 原文節錄\n\n{header}\n\n{quoted}"
+
+
 def source_only_summary(source_type: str, text: str, failures: list[str]) -> dict:
     """Create a transparent, injection-safe note when every LLM is unavailable."""
     plain = re.sub(r"!\[[^\]]*\]\([^)]*\)", " ", text)
@@ -687,23 +754,35 @@ def source_only_summary(source_type: str, text: str, failures: list[str]) -> dic
     for raw_line in plain.splitlines():
         line = re.sub(r"^[\s#>*`~|\-]+", "", raw_line).strip()
         line = re.sub(r"\s+", " ", line)
-        if 12 <= len(line) <= 500 and not line.lower().startswith(("http://", "https://")):
-            lines.append(line)
+        for piece in _split_long_line(line):
+            if 12 <= len(piece) <= 500 and not piece.lower().startswith(("http://", "https://")):
+                lines.append(piece)
     unique: list[str] = []
     for line in lines:
         if line not in unique:
             unique.append(line)
-    title = next((line for line in unique if len(line) <= 140), f"{source_type} 來源暫存")
+    title = next((line for line in unique if len(line) <= 140), "")
+    if not title and unique:
+        # Captions carrying no punctuation only ever hard-wrap into 500-char
+        # pieces, so nothing passes the <=140 test and the title used to
+        # collapse to the useless "youtube 來源暫存". A truncated first piece
+        # at least says what the video was about.
+        title = unique[0][:60].rstrip() + "…"
+    title = title or f"{source_type} 來源暫存"
     sentences: list[str] = []
     for line in unique:
         for sentence in re.split(r"(?<=[。！？.!?])\s*", line):
             sentence = sentence.strip()
             if 20 <= len(sentence) <= 260 and sentence not in sentences:
                 sentences.append(sentence)
-    summary = (sentences[0] if sentences else title)[:300]
-    points = sentences[1:6] or unique[1:6]
-    excerpts = unique[1:12]
-    details = "\n\n".join(excerpts) if excerpts else "來源已擷取，但暫時無法產生詳細摘要。"
+    summary = (sentences[0] if sentences else unique[0] if unique else title)[:300]
+    # Punctuation-free captions only split into 500-char chunks; unbulleted at
+    # that width the section is unreadable, and the full text is quoted below.
+    points = [point[:200].rstrip() + "…" if len(point) > 200 else point
+              for point in (sentences[1:6] or unique[1:6])]
+    # Only the verbatim block: every curated line above is a substring of it,
+    # so joining both would nearly double the note for no added information.
+    details = raw_excerpt(plain) or "來源已擷取，但暫時無法產生詳細摘要。"
     return to_zh_tw({
         "title": title,
         "source_type": source_type,
@@ -747,7 +826,9 @@ def summarize(url: str, source_type: str, text: str, truncated: bool) -> dict:
             "max_tokens": 3500,
             "stream": False,
         }
-        if model.startswith("nvidia/nemotron-3-"):
+        # 前綴不可寫成 "nemotron-3-"：3.5 系列的 id 是 "nemotron-3.5-..."，
+        # 那樣會漏掉，thinking 沒關成、輸出多出推理段落而拖慢或解析失敗。
+        if model.startswith("nvidia/nemotron-3"):
             payload["chat_template_kwargs"] = {"enable_thinking": False}
         try:
             response = requests.post(

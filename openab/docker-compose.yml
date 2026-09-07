@@ -102,7 +102,11 @@ services:
       VAULT: "/vault"
       STEEL: "http://steel-api:3000"
       NVIDIA_MODEL: "minimaxai/minimax-m3"
-      NVIDIA_FALLBACK_MODEL: "nvidia/nemotron-3-nano-30b-a3b"
+      # 2026-09-07：nemotron-3-nano-30b-a3b 被 NIM 下架（HTTP 410 end of life，
+      # 已從 /v1/models 消失），改用同級唯一還活著的 nemotron-3.5-lightning。
+      # 這裡的值會蓋掉 bot.py 的預設值——改模型時兩邊都要動，否則只改 bot.py
+      # 等於沒改（這次就是這樣才發現的）。
+      NVIDIA_FALLBACK_MODEL: "nvidia/nemotron-3.5-lightning-30b-a3b"
       NVIDIA_FINAL_FALLBACK_MODEL: "nvidia/nemotron-3-super-120b-a12b"
       NVIDIA_PRIMARY_TIMEOUT: "120"
       NVIDIA_FALLBACK_TIMEOUT: "180"
