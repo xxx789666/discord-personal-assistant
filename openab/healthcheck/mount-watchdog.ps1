@@ -767,17 +767,72 @@ function Get-ComposeHealthcheckLsPaths {
   return $paths
 }
 
+# 2026-09-10：把「卡在 9p RPC 的行程數」從探測輸出解析出來。
+# 回傳 -1 ＝探測不可判定（沒跑成、被截斷），>=0 ＝真實計數。
+# 探測腳本最後一定印 P9DONE：少了它就代表輸出不完整，這時「看到 0 行 P9STUCK」
+# 不等於「真的沒有卡住的行程」。今天那則假告警就是探測失敗與合法答案撞值造成的，
+# 不能在這裡再犯一次同樣的錯。
+function Measure-StuckP9 {
+  param(
+    [int]$ExitCode,
+    [string]$Output
+  )
+  if ($ExitCode -ne 0) { return -1 }
+  $text = ''
+  if ($null -ne $Output) { $text = [string]$Output }
+  if ($text -notmatch '(?m)^\s*P9DONE\s*$') { return -1 }
+  return ([regex]::Matches($text, '(?m)^\s*P9STUCK\s+\d+(\s.*)?$')).Count
+}
+
+# 把卡住的行程寫進告警本文，這樣下次不必再從 /proc 手動挖一次。
+# 只列 PID 最小的三個：那是最早卡住的，最可能是元兇；PID 大的多半是後來排隊
+# 排到逾時被殺、卻留在 D 狀態的受害者（2026-09-10 那次 259 個裡只有 2 個是真兇）。
+function Format-StuckP9Notice {
+  param(
+    [int]$Count,
+    [string]$Output
+  )
+  if ($Count -le 0) { return '' }
+  $rows = @()
+  foreach ($ln in (([string]$Output) -replace "`r", '' -split "`n")) {
+    $m = [regex]::Match($ln, '^\s*P9STUCK\s+(\d+)\s*(.*?)\s*$')
+    if ($m.Success) {
+      $rows += [pscustomobject]@{ Pid = [int]$m.Groups[1].Value; Cmd = $m.Groups[2].Value }
+    }
+  }
+  if ($rows.Count -eq 0) { return '' }
+  $head = @($rows | Sort-Object Pid | Select-Object -First 3 | ForEach-Object {
+    "  - PID {0} {1}" -f $_.Pid, $_.Cmd
+  })
+  return ("`n🧩 VM 內有 **{0}** 個行程卡在 ``p9_client_rpc``（D 狀態，SIGKILL 殺不掉、重啟容器也清不掉），只有汰換 VM 有效。最早卡住的：`n{1}" -f $Count, ($head -join "`n"))
+}
+
 function Get-ScopeAction {
   param(
     [string]$Scope,
-    [bool]$VmDegraded = $false
+    [bool]$VmDegraded = $false,
+    [int]$StuckP9 = -1
   )
   if ($Scope -eq 'vm') { return 'self-heal' }
   if ($Scope -eq 'container') {
     if ($VmDegraded) { return 'observe' }
     return 'restart-failed'
   }
-  if ($Scope -eq 'daemon') { return 'alert-only' }
+  if ($Scope -eq 'daemon') {
+    # 2026-09-10：Scope=daemon 原本一律只告警。但那天的故障是 D: 這一個 9p
+    # session 被塞死（C:/E: 正常），Tier2 逾時 → exit 124 → 判成 daemon，
+    # 於是 watchdog 每 5 分鐘告警一次、永遠不動手，等了人來下 wsl --shutdown。
+    # 而 wsl --shutdown 正是它給 Scope=vm 用的那個自癒動作。
+    #
+    # 放寬條件刻意收得很窄：要有「行程卡在 p9_client_rpc 且是 D（不可中斷）」
+    # 的正面證據才自癒。這種行程 SIGKILL 殺不掉、重啟容器也清不掉，只有汰換
+    # VM 有效，所以證據成立時 wsl --shutdown 是唯一正解。
+    # 沒有這個證據就維持原本的 alert-only —— Docker daemon 單純沒開／正在啟動
+    # 也會走到 daemon，對那種情況重開 VM 是錯的解法。
+    # StuckP9 = -1（探測不可判定）同樣不自癒：不確定就不動手。
+    if ($StuckP9 -gt 0) { return 'self-heal' }
+    return 'alert-only'
+  }
   if ($Scope -eq 'all-down') { return 'none' }
   return 'none'
 }
@@ -1470,6 +1525,41 @@ drwxr-xr-x 1 root root  512 Aug 27 00:00 e
   Assert-Eq (Get-ScopeAction 'container' -VmDegraded $true) 'observe' 'container+VmDegraded skips restart (conservative)'
   Assert-Eq (Get-ScopeAction 'daemon' -VmDegraded $true) 'alert-only' 'daemon+VmDegraded still alert-only (no heal)'
 
+  # ── 2026-09-10：Scope=daemon 在有「9p 卡死」正面證據時才自癒 ──────────────
+  # 那天的真實輸出形狀：259 個 D 狀態行程卡在 p9_client_rpc，真兇是兩個低 PID
+  # 的 publish.py（開機後 11 秒就卡住），其餘都是排隊排到逾時的受害者。
+  $p9Real = "P9STUCK 271370 ls /vault`nP9STUCK 1143 python -u /app/publish.py`nP9STUCK 271295 ls /vault`nP9STUCK 1558 python -u /app/publish.py`nP9DONE"
+  Assert-Eq (Measure-StuckP9 -ExitCode 0 -Output $p9Real) 4 'counts every P9STUCK row'
+  Assert-Eq (Measure-StuckP9 -ExitCode 0 -Output "P9DONE") 0 'sentinel with no rows => genuine zero'
+  # 探測失敗絕不可以跟「真的是 0」撞值 —— 這正是同日 OAuth 假告警的成因。
+  Assert-Eq (Measure-StuckP9 -ExitCode 124 -Output '') -1 'timeout => inconclusive, not zero'
+  Assert-Eq (Measure-StuckP9 -ExitCode 1 -Output 'P9DONE') -1 'non-zero exit => inconclusive even with sentinel'
+  Assert-Eq (Measure-StuckP9 -ExitCode 0 -Output '') -1 'empty output => inconclusive, not zero'
+  Assert-Eq (Measure-StuckP9 -ExitCode 0 -Output "P9STUCK 1143 python") -1 'truncated (no sentinel) => inconclusive'
+  Assert-Eq (Measure-StuckP9 -ExitCode 0 -Output "P9STUCKY 1143 x`nP9DONE") 0 'near-miss token is not counted'
+
+  Assert-Eq (Get-ScopeAction 'daemon' -StuckP9 3) 'self-heal' 'daemon + stuck 9p => self-heal (wsl --shutdown is the only fix)'
+  Assert-Eq (Get-ScopeAction 'daemon' -StuckP9 0) 'alert-only' 'daemon + no stuck 9p => still alert-only'
+  Assert-Eq (Get-ScopeAction 'daemon' -StuckP9 -1) 'alert-only' 'daemon + inconclusive probe => alert-only (never act on a guess)'
+  Assert-Eq (Get-ScopeAction 'daemon') 'alert-only' 'daemon default (no probe) unchanged'
+  Assert-Eq (Get-ScopeAction 'container' -StuckP9 3) 'restart-failed' 'stuck 9p does not change container scope'
+  Assert-Eq (Get-ScopeAction 'all-down' -StuckP9 3) 'none' 'stuck 9p does not wake all-down'
+  Assert-Eq (Get-ScopeAction 'vm' -StuckP9 -1) 'self-heal' 'vm heal trigger unchanged by the probe'
+
+  $p9Notice = Format-StuckP9Notice -Count 4 -Output $p9Real
+  Assert-True ($p9Notice -match 'p9_client_rpc') 'notice names the wchan so the cause is in the alert'
+  Assert-True ($p9Notice -match 'PID 1143 python -u /app/publish\.py') 'notice lists the oldest stuck PID with its command'
+  Assert-True ($p9Notice -match 'PID 1558') 'notice keeps the second-oldest culprit'
+  # 輸入刻意亂序：排序必須照 PID 數值，不是照輸出順序，否則列到的是受害者。
+  Assert-True ($p9Notice -notmatch 'PID 271370') 'notice drops the newest queued victim, keeps the 3 oldest'
+  Assert-True ($p9Notice -match '\*\*4\*\*') 'notice reports the full count, not just the 3 shown'
+  Assert-Eq (Format-StuckP9Notice -Count 0 -Output 'P9DONE') '' 'no notice when nothing is stuck'
+  Assert-Eq (Format-StuckP9Notice -Count -1 -Output '') '' 'no notice when the probe was inconclusive'
+
+  Assert-True ($P9StuckShell -match 'p9_client_rpc') 'probe shell filters on the p9 wchan'
+  Assert-True ($P9StuckShell -match 'echo P9DONE') 'probe shell emits the completion sentinel'
+
+
   Assert-Eq (Resolve-FirstExistingPath -Explicit 'C:\forced.env' -Candidates @('C:\nope.env')) 'C:\forced.env' 'explicit AlertEnv wins over search'
   Assert-Eq (Resolve-FirstExistingPath -Explicit '' -Candidates @($PSScriptRoot, 'C:\no-such-mw.env')) $PSScriptRoot 'search picks first existing path'
 
@@ -1625,6 +1715,50 @@ function Invoke-WslListRunning {
   $psi.RedirectStandardOutput = $true
   $psi.RedirectStandardError = $true
   $psi.StandardOutputEncoding = [System.Text.Encoding]::Unicode
+
+  $proc = New-Object System.Diagnostics.Process
+  $proc.StartInfo = $psi
+  [void]$proc.Start()
+  $outTask = $proc.StandardOutput.ReadToEndAsync()
+  $errTask = $proc.StandardError.ReadToEndAsync()
+  if (-not $proc.WaitForExit($TimeoutSec * 1000)) {
+    try { $proc.Kill() } catch {}
+    return @{ Code = 124; Out = ''; Err = "timeout after ${TimeoutSec}s" }
+  }
+  $out = $outTask.Result
+  $err = $errTask.Result
+  if ($null -eq $out) { $out = '' }
+  if ($null -eq $err) { $err = '' }
+  return @{ Code = [int]$proc.ExitCode; Out = [string]$out; Err = [string]$err }
+}
+
+$P9StuckShell = @'
+for p in /proc/[0-9]*; do
+  s=$(awk '/^State:/{print $2}' $p/status 2>/dev/null)
+  [ "$s" = D ] || continue
+  w=$(cat $p/wchan 2>/dev/null)
+  [ "$w" = p9_client_rpc ] || continue
+  echo P9STUCK ${p#/proc/} $(tr '\0' ' ' < $p/cmdline 2>/dev/null | cut -c1-60)
+done
+echo P9DONE
+'@
+
+function Invoke-StuckP9Probe {
+  param([int]$TimeoutSec = 20)
+  # 只讀 /proc —— 那不是 9p，所以掛載塞死時這支照樣跑得動（2026-09-10 實測）。
+  # 不用 docker run：daemon 這時常常也已經不回應了。
+  # 不用 Invoke-Cmd 包 wsl.exe：它會逐參加引號，wsl.exe 會把 -d 當成要在預設
+  # distro 裡執行的指令（同 Invoke-WslListRunning 的註解）。
+  # 腳本用 base64 傳進去，免掉多行與巢狀引號在 Arguments 字串裡的所有轉義問題。
+  $b64 = [Convert]::ToBase64String([Text.Encoding]::ASCII.GetBytes($P9StuckShell))
+  $psi = New-Object System.Diagnostics.ProcessStartInfo
+  $psi.FileName = 'wsl.exe'
+  $psi.Arguments = "-d docker-desktop -e sh -c `"echo $b64 | base64 -d | sh`""
+  $psi.UseShellExecute = $false
+  $psi.CreateNoWindow = $true
+  $psi.RedirectStandardOutput = $true
+  $psi.RedirectStandardError = $true
+  $psi.StandardOutputEncoding = [System.Text.Encoding]::UTF8
 
   $proc = New-Object System.Diagnostics.Process
   $proc.StartInfo = $psi
@@ -2223,6 +2357,22 @@ if (-not $decision.AllowRecovered -and $alert.Kind -eq 'recovered') {
 }
 Write-Log ("[STATE] prev={0} new={1} scope={2} alert={3} send={4} probed={5} vmDegraded={6} slowPeers={7}" -f $state.status, $newStatus, $scope, $alert.Kind, $alert.Send, $decision.Probed, $decision.VmDegraded, $decision.SlowPeerCount)
 
+# 2026-09-10：Scope=daemon 時多問一句「VM 裡有沒有行程卡在 9p RPC」。
+# 有＝這是 9p session 塞死，wsl --shutdown 是唯一解，可以自癒（見 Get-ScopeAction）。
+# 沒有＝維持原本的 alert-only。探測只讀 /proc，掛載壞掉時照樣跑得動。
+$stuckP9 = -1
+$stuckP9Out = ''
+if ($newStatus -eq 'FAIL' -and $scope -eq 'daemon') {
+  $p9 = Invoke-StuckP9Probe 20
+  $stuckP9 = Measure-StuckP9 -ExitCode $p9.Code -Output $p9.Out
+  $stuckP9Out = [string]$p9.Out
+  if ($stuckP9 -lt 0) {
+    Write-Log ("[P9] probe inconclusive (exit={0} err={1}) — no evidence, staying alert-only" -f $p9.Code, ([string]$p9.Err).Trim())
+  } else {
+    Write-Log ("[P9] stuck in p9_client_rpc = {0}" -f $stuckP9)
+  }
+}
+
 $notice = $null
 if ($newStatus -eq 'FAIL') {
   $failBody = Format-FailList $failed
@@ -2231,6 +2381,7 @@ if ($newStatus -eq 'FAIL') {
   }
   $notice = "<@$OwnerId> ⚠️ **mount-watchdog** 掛載檢查失敗（Scope=$scope）`n" + $failBody
   $notice = Add-VmDegradedNotice $notice $decision
+  $notice += (Format-StuckP9Notice -Count $stuckP9 -Output $stuckP9Out)
 } elseif ($alert.Kind -eq 'recovered') {
   $notice = "<@$OwnerId> ✅ **mount-watchdog** 掛載已恢復（先前 Scope=$($state.scope)）"
 }
@@ -2245,7 +2396,7 @@ if ($null -ne $notice) {
 $healOutcome = $null
 $failedBeforeAction = $failed
 if ($newStatus -eq 'FAIL') {
-  $action = Get-ScopeAction -Scope $scope -VmDegraded ([bool]$decision.VmDegraded)
+  $action = Get-ScopeAction -Scope $scope -VmDegraded ([bool]$decision.VmDegraded) -StuckP9 $stuckP9
   Write-Log ("[ACTION] {0}" -f $action)
   if ($action -eq 'self-heal') {
     $budget = Get-HealBudget -HealAt $state.healAt -Now $now -MaxHeals $HealMax -WindowHours $HealWindowHours -MinIntervalMinutes $HealMinIntervalMinutes
@@ -2303,7 +2454,13 @@ if ($newStatus -eq 'FAIL') {
       }
     }
   } else {
-    Write-Log '[ACTION] daemon/unknown: alert only, no self-heal'
+    if ($scope -eq 'daemon' -and $stuckP9 -eq 0) {
+      Write-Log '[ACTION] daemon: alert only — no process stuck in p9_client_rpc, so recycling the VM is not the fix'
+    } elseif ($scope -eq 'daemon' -and $stuckP9 -lt 0) {
+      Write-Log '[ACTION] daemon: alert only — stuck-9p probe inconclusive, not acting on a guess'
+    } else {
+      Write-Log '[ACTION] daemon/unknown: alert only, no self-heal'
+    }
   }
 }
 
