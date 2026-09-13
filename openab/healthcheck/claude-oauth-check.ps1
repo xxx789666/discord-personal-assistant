@@ -153,6 +153,25 @@ foreach ($t in $Targets) {
     $detectOut = ($detect.Out).Trim()
     $usingEnvToken = ($detectOut -eq 'YES')
 
+    # ⚠ 2026-09-10：只判 UNREADABLE 不夠。9p 掛載「卡住」而不是回 EIO 時，
+    #    docker exec 會一路卡到 Invoke-Cmd 的 timeout，回 Code=124、Out=''，
+    #    而空字串剛好不等於 'YES' → 又一次退回去讀遷移前的 .credentials.json
+    #    → 對正常運作的 bot 發假告警（實例：12:00 D: 的 9p 塞死，12:07 送出）。
+    #    這是 08-31 那個第三態坑的同一形狀，只是換成逾時而非 EIO：探測失敗
+    #    必須跟「探測成功、答案是 NO」徹底分開。改成白名單——只認三個合法
+    #    答案，其餘（逾時、非零 exit、空字串、非預期字串）一律當探測失敗。
+    if ($detect.Code -ne 0 -or $detectOut -notin @('YES', 'NO', 'UNREADABLE')) {
+      if ($detect.Code -eq 124) {
+        $why = '逾時（掛載卡住？）'
+      } elseif ($detect.Code -ne 0) {
+        $why = "exit $($detect.Code)：$(($detect.Err).Trim())"
+      } else {
+        $why = "非預期輸出：$detectOut"
+      }
+      Write-Output "[SKIP] $name 無法判定認證模式（$why）——略過認證檢查，交給 mount-watchdog"
+      continue
+    }
+
     # config.toml 讀不到 = 掛載故障，不是認證故障。這裡直接跳過，不要退回憑證檔
     # 檢查——那會拿遷移前的殘留憑證產生假告警。掛載本身由 mount-watchdog 負責。
     # 刻意不動節流狀態檔：若先前有真故障被節流，不該因為這次跳過就被清掉。
