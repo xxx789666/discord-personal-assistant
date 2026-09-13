@@ -1,5 +1,6 @@
 import importlib.util
 import os
+import re
 import tempfile
 import unittest
 from pathlib import Path
@@ -466,6 +467,120 @@ class UrlIntakeTests(unittest.TestCase):
             finally:
                 BOT.VAULT = original
         self.assertNotEqual(first.name, second.name)
+
+    def test_compose_env_parser_scopes_to_named_service(self):
+        # compose 裡多個 service 都可能有 NVIDIA_*；全檔搜第一個會鎖錯鏈。
+        yaml_text = """
+services:
+  other-bot:
+    environment:
+      NVIDIA_MODEL: "wrong/first-hit"
+      NVIDIA_FALLBACK_MODEL: "wrong/first-fallback"
+      NVIDIA_FINAL_FALLBACK_MODEL: "wrong/first-final"
+  openab-url-intake:
+    image: assistant-url-intake:dev
+    environment:
+      CHANNEL_ID: "1"
+      NVIDIA_MODEL: "openai/gpt-oss-20b"
+      NVIDIA_FALLBACK_MODEL: "google/gemma-4-31b-it"
+      NVIDIA_FINAL_FALLBACK_MODEL: "nvidia/nemotron-3-super-120b-a12b"
+    volumes:
+      - /vault
+  later-bot:
+    environment:
+      NVIDIA_MODEL: "wrong/later-hit"
+"""
+        env = _compose_service_environment(yaml_text, "openab-url-intake")
+        self.assertEqual(env["NVIDIA_MODEL"], "openai/gpt-oss-20b")
+        self.assertEqual(env["NVIDIA_FALLBACK_MODEL"], "google/gemma-4-31b-it")
+        self.assertEqual(
+            env["NVIDIA_FINAL_FALLBACK_MODEL"],
+            "nvidia/nemotron-3-super-120b-a12b",
+        )
+
+    def test_url_intake_compose_nvidia_models_match_bot_defaults(self):
+        # 2026-09-07 / 09-13 都踩過：compose environment 會蓋掉 bot.py 預設值，
+        # 只改一邊等於沒改。讀 bot.py 原始碼而不是 BOT.NVIDIA_MODEL，這樣就算
+        # 開發機 / CI 設了 NVIDIA_MODEL 也不會鎖到環境變數。
+        names = (
+            "NVIDIA_MODEL",
+            "NVIDIA_FALLBACK_MODEL",
+            "NVIDIA_FINAL_FALLBACK_MODEL",
+        )
+        bot_src = Path(__file__).with_name("bot.py").read_text(encoding="utf-8")
+        compose_src = (
+            Path(__file__).resolve().parents[1] / "docker-compose.yml"
+        ).read_text(encoding="utf-8")
+        bot_defaults = _bot_environ_defaults(bot_src, names)
+        compose_env = _compose_service_environment(compose_src, "openab-url-intake")
+        for name in names:
+            self.assertIn(name, compose_env)
+            self.assertEqual(
+                compose_env[name],
+                bot_defaults[name],
+                f"{name} differs between docker-compose.yml url-intake and bot.py default",
+            )
+        self.assertEqual(bot_defaults["NVIDIA_MODEL"], "openai/gpt-oss-20b")
+        self.assertEqual(bot_defaults["NVIDIA_FALLBACK_MODEL"], "google/gemma-4-31b-it")
+        self.assertEqual(
+            bot_defaults["NVIDIA_FINAL_FALLBACK_MODEL"],
+            "nvidia/nemotron-3-super-120b-a12b",
+        )
+
+
+def _bot_environ_defaults(source, names):
+    defaults = {}
+    for name in names:
+        pattern = (
+            rf'{re.escape(name)}\s*=\s*os\.environ\.get\(\s*'
+            rf'["\']{re.escape(name)}["\']\s*,\s*["\']([^"\']+)["\']'
+        )
+        match = re.search(pattern, source, flags=re.DOTALL)
+        if match is None:
+            raise AssertionError(f"could not find os.environ.get default for {name}")
+        defaults[name] = match.group(1)
+    return defaults
+
+
+def _compose_service_environment(compose_text, service_name):
+    env = {}
+    in_service = False
+    in_env = False
+    service_indent = None
+    env_indent = None
+    for raw in compose_text.splitlines():
+        stripped = raw.lstrip(" ")
+        indent = len(raw) - len(stripped)
+        if not in_service:
+            if stripped.startswith("#") or stripped == "":
+                continue
+            if stripped.rstrip() == f"{service_name}:":
+                in_service = True
+                service_indent = indent
+            continue
+        if stripped and not stripped.startswith("#") and indent <= service_indent:
+            break
+        if not in_env:
+            if stripped.startswith("#") or stripped == "":
+                continue
+            if stripped.rstrip() == "environment:":
+                in_env = True
+                env_indent = indent
+            continue
+        if stripped and not stripped.startswith("#") and indent <= env_indent:
+            in_env = False
+            if indent <= service_indent:
+                break
+            continue
+        match = re.match(
+            r'^([A-Z][A-Z0-9_]*):\s*(?:"([^"]*)"|([^#\s]+))\s*(?:#.*)?$',
+            stripped,
+        )
+        if match:
+            env[match.group(1)] = match.group(2) if match.group(2) is not None else match.group(3)
+    if not in_service and not env:
+        raise AssertionError(f"service {service_name} not found in compose text")
+    return env
 
 
 if __name__ == "__main__":

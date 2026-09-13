@@ -49,14 +49,16 @@ CLOUDFLARE_API_TOKEN = os.environ.get("CLOUDFLARE_API_TOKEN", "").strip()
 ALLOW_STEEL_FALLBACK = os.environ.get("ALLOW_STEEL_FALLBACK", "false").lower() == "true"
 NVIDIA_KEY = os.environ["NVIDIA_API_KEY"]
 NVIDIA_BASE = os.environ.get("NVIDIA_BASE_URL", "https://integrate.api.nvidia.com/v1")
-NVIDIA_MODEL = os.environ.get("NVIDIA_MODEL", "minimaxai/minimax-m3")
-# 2026-09-07：nvidia/nemotron-3-nano-30b-a3b 被 NIM 下架，呼叫回 HTTP 410
-# "has reached its end of life"，且已從 /v1/models 消失——這種錯誤永遠不會自己
-# 好，之後每次摘要都只是多花 0.2 秒空轉一個死掉的備援。這是第二次踩到 NIM 無
-# 預警下架（前一次是 kimi-k2.6），備援鏈上看到 410/404 一律當永久失效處理。
-# 同級還活著的替補目前只有 nemotron-3.5-lightning-30b-a3b（實測 200 / 0.9s）。
+NVIDIA_MODEL = os.environ.get("NVIDIA_MODEL", "openai/gpt-oss-20b")
+# 2026-09-13：minimaxai/minimax-m3 於 2026-09-09 EOL。NIM 回 HTTP 410
+# "has reached its end of life on 2026-09-09T09:00:00Z"，且已從 /v1/models
+# 消失——這種錯誤永遠不會自己好。這是第三次 NIM 無預警下架（前兩次是
+# kimi-k2.6 與 nemotron-3-nano）。剩下兩個 nemotron JSON 輸出不穩（實測
+# lightning 11/16、super 9/15），主／備改走 openai/gpt-oss-20b 與
+# google/gemma-4-31b-it（兩者 JSON 10/10）。備援鏈上看到 410/404 一律當
+# 永久失效；compose environment 會蓋掉這裡的預設值，兩邊都要改。
 NVIDIA_FALLBACK_MODEL = os.environ.get(
-    "NVIDIA_FALLBACK_MODEL", "nvidia/nemotron-3.5-lightning-30b-a3b"
+    "NVIDIA_FALLBACK_MODEL", "google/gemma-4-31b-it"
 ).strip()
 NVIDIA_FINAL_FALLBACK_MODEL = os.environ.get(
     "NVIDIA_FINAL_FALLBACK_MODEL", "nvidia/nemotron-3-super-120b-a12b"
