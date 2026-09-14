@@ -49,16 +49,23 @@ CLOUDFLARE_API_TOKEN = os.environ.get("CLOUDFLARE_API_TOKEN", "").strip()
 ALLOW_STEEL_FALLBACK = os.environ.get("ALLOW_STEEL_FALLBACK", "false").lower() == "true"
 NVIDIA_KEY = os.environ["NVIDIA_API_KEY"]
 NVIDIA_BASE = os.environ.get("NVIDIA_BASE_URL", "https://integrate.api.nvidia.com/v1")
-NVIDIA_MODEL = os.environ.get("NVIDIA_MODEL", "openai/gpt-oss-20b")
-# 2026-09-13：minimaxai/minimax-m3 於 2026-09-09 EOL。NIM 回 HTTP 410
-# "has reached its end of life on 2026-09-09T09:00:00Z"，且已從 /v1/models
-# 消失——這種錯誤永遠不會自己好。這是第三次 NIM 無預警下架（前兩次是
-# kimi-k2.6 與 nemotron-3-nano）。剩下兩個 nemotron JSON 輸出不穩（實測
-# lightning 11/16、super 9/15），主／備改走 openai/gpt-oss-20b 與
-# google/gemma-4-31b-it（兩者 JSON 10/10）。備援鏈上看到 410/404 一律當
-# 永久失效；compose environment 會蓋掉這裡的預設值，兩邊都要改。
+NVIDIA_MODEL = os.environ.get("NVIDIA_MODEL", "google/gemma-4-31b-it")
+# 2026-09-13：minimaxai/minimax-m3 於 2026-09-09 EOL（HTTP 410，已從 /v1/models
+# 消失）——這種錯誤永遠不會自己好，是第三次 NIM 無預警下架（前兩次是 kimi-k2.6
+# 與 nemotron-3-nano）。備援鏈上看到 410/404 一律當永久失效。
+#
+# 2026-09-14：順序改成 gemma 打頭。09-13 把 gpt-oss-20b 排第一，依據只有 16k 字
+# 短來源的量測（兩者都 10/10）；MAX_SOURCE_CHARS 拉到 180000 之後那個前提就不
+# 成立了。同一份講座逐字稿實測：
+#   98,837 字   gpt-oss 3/3（一次空細節）53.8s ／ gemma 3/3 45.9s
+#   180,000 字  gpt-oss 1/3、平均 102.3s、唯一成功的細節是空的
+#               gemma 3/3、69.2s、細節 1110–1238 字
+# gpt-oss 在 180k 幾乎必敗，而且 102.3s 已經逼近 NVIDIA_PRIMARY_TIMEOUT=120。
+# gemma 在每個量過的尺寸都不差於它，長輸入則大幅勝出，所以由它打頭；
+# gpt-oss 留在第二層（短來源仍然 10/10）。
+# compose environment 會蓋掉這裡的預設值，改模型兩邊都要動。
 NVIDIA_FALLBACK_MODEL = os.environ.get(
-    "NVIDIA_FALLBACK_MODEL", "google/gemma-4-31b-it"
+    "NVIDIA_FALLBACK_MODEL", "openai/gpt-oss-20b"
 ).strip()
 NVIDIA_FINAL_FALLBACK_MODEL = os.environ.get(
     "NVIDIA_FINAL_FALLBACK_MODEL", "nvidia/nemotron-3-super-120b-a12b"

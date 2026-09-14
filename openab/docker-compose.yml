@@ -101,13 +101,14 @@ services:
       ALLOWED_USERS: "843428445802725388,1488170559865884684"
       VAULT: "/vault"
       STEEL: "http://steel-api:3000"
-      NVIDIA_MODEL: "openai/gpt-oss-20b"
-      # 2026-09-13：minimax-m3 於 2026-09-09 EOL（HTTP 410，已從 /v1/models
-      # 消失）。這是第三次 NIM 無預警下架（前兩次 kimi-k2.6、nemotron-3-nano）。
-      # 主／備改 gpt-oss-20b 與 gemma-4-31b-it（JSON 10/10）；第三層仍留 super。
+      NVIDIA_MODEL: "google/gemma-4-31b-it"
+      # 2026-09-13：minimax-m3 於 2026-09-09 EOL（HTTP 410，已從 /v1/models 消失）；
+      # 第三次 NIM 無預警下架（前兩次 kimi-k2.6、nemotron-3-nano）。
+      # 2026-09-14：gemma 改打頭。MAX_SOURCE_CHARS 拉到 180000 後實測 gpt-oss 在
+      # 180k 只有 1/3 合法且平均 102.3s（timeout 120），gemma 3/3、69.2s。
       # 這裡的值會蓋掉 bot.py 的預設值——改模型時兩邊都要動，否則只改 bot.py
-      # 等於沒改（09-07 就是這樣才發現的）。
-      NVIDIA_FALLBACK_MODEL: "google/gemma-4-31b-it"
+      # 等於沒改（09-07 就是這樣才發現的）。測試會強制兩邊一致。
+      NVIDIA_FALLBACK_MODEL: "openai/gpt-oss-20b"
       NVIDIA_FINAL_FALLBACK_MODEL: "nvidia/nemotron-3-super-120b-a12b"
       NVIDIA_PRIMARY_TIMEOUT: "120"
       NVIDIA_FALLBACK_TIMEOUT: "180"

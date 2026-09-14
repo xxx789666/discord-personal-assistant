@@ -748,8 +748,8 @@ services:
                 bot_defaults[name],
                 f"{name} differs between docker-compose.yml url-intake and bot.py default",
             )
-        self.assertEqual(bot_defaults["NVIDIA_MODEL"], "openai/gpt-oss-20b")
-        self.assertEqual(bot_defaults["NVIDIA_FALLBACK_MODEL"], "google/gemma-4-31b-it")
+        self.assertEqual(bot_defaults["NVIDIA_MODEL"], "google/gemma-4-31b-it")
+        self.assertEqual(bot_defaults["NVIDIA_FALLBACK_MODEL"], "openai/gpt-oss-20b")
         self.assertEqual(
             bot_defaults["NVIDIA_FINAL_FALLBACK_MODEL"],
             "nvidia/nemotron-3-super-120b-a12b",
