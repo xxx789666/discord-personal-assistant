@@ -69,7 +69,14 @@ NVIDIA_FINAL_FALLBACK_TIMEOUT = int(
     os.environ.get("NVIDIA_FINAL_FALLBACK_TIMEOUT", "120")
 )
 GROQ_KEY = os.environ.get("GROQ_API_KEY", "")
-MAX_SOURCE_CHARS = int(os.environ.get("MAX_SOURCE_CHARS", "90000"))
+# 2026-09-14：90000 不是模型的限制，是個沒人量過的舊值。實測同一份講座逐字稿，
+# 三個模型（gpt-oss-20b / gemma-4-31b-it / nemotron-3-super）送到 400,000 字
+# 約 86–90k token 全部回 200，沒有任何 context 錯誤。真正會咬人的是延遲：400k
+# 要 57–86 秒，而 NVIDIA_PRIMARY_TIMEOUT 是 120——上限和 timeout 是綁在一起的。
+# 180000 約可裝下三小時的影片（實測 104 分鐘的課 = 98,837 字，約每分鐘 950 字），
+# 延遲仍在 30–75 秒、離 timeout 有餘裕。再往上換到的不是更好的摘要：不管餵 16k
+# 還是 99k，details_md 都是 800–1500 字，只是變得更概括。
+MAX_SOURCE_CHARS = int(os.environ.get("MAX_SOURCE_CHARS", "180000"))
 MAX_DOWNLOAD_BYTES = int(os.environ.get("MAX_DOWNLOAD_BYTES", str(30 * 1024 * 1024)))
 MIN_BODY_CHARS = int(os.environ.get("MIN_BODY_CHARS", "300"))
 # How much of the raw source to quote verbatim when every model failed.

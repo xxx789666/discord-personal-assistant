@@ -669,6 +669,27 @@ class UrlIntakeTests(unittest.TestCase):
         self.assertIn("Stanford acaba de filtrar", text)
         self.assertIn("第一句課程內容", text)
 
+    def test_a_full_length_lecture_transcript_is_not_truncated(self):
+        # 這條測的是意圖不是數字：一場完整長講座必須整篇進得去。
+        # 2026-09-14 實測 104 分鐘的 Stanford 課程 = 98,837 字（約每分鐘 950 字），
+        # 舊上限 90000 會把中段約 9% 切掉。三小時的影片約 170,000 字。
+        lecture = "字" * 98837
+        text, truncated = BOT.truncate_source(lecture)
+        self.assertFalse(truncated)
+        self.assertEqual(text, lecture)
+        three_hours = "字" * 170000
+        self.assertFalse(BOT.truncate_source(three_hours)[1])
+
+    def test_truncate_source_still_keeps_head_and_tail_when_it_must(self):
+        # 上限提高不代表截斷邏輯可以壞掉：超過就還是保留頭尾並標記。
+        over = "頭" * BOT.MAX_SOURCE_CHARS + "尾" * 5000
+        text, truncated = BOT.truncate_source(over)
+        self.assertTrue(truncated)
+        self.assertIn("[中段因長度限制省略]", text)
+        self.assertTrue(text.startswith("頭"))
+        self.assertTrue(text.endswith("尾"))
+        self.assertLess(len(text), len(over))
+
     def test_compose_env_parser_scopes_to_named_service(self):
         # compose 裡多個 service 都可能有 NVIDIA_*；全檔搜第一個會鎖錯鏈。
         yaml_text = """
