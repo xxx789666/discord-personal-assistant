@@ -592,9 +592,15 @@ services:
             "NVIDIA_FINAL_FALLBACK_MODEL",
         )
         bot_src = Path(__file__).with_name("bot.py").read_text(encoding="utf-8")
-        compose_src = (
-            Path(__file__).resolve().parents[1] / "docker-compose.yml"
-        ).read_text(encoding="utf-8")
+        # Dockerfile 只 COPY bot.py 與 test_bot.py，所以 image 內沒有 compose 檔，
+        # 而 build 階段會跑這整份測試。2026-09-14：這裡原本直接讀檔，於是整個
+        # docker build 掛在 FileNotFoundError: '/docker-compose.yml'——而且因為
+        # 上一次部署只用 up -d 沒有 --build，這個破壞被推上去一天才被發現。
+        # 在 repo（含 CI）裡檔案一定在，鎖定效力不變；只有 image 內才跳過。
+        compose_path = Path(__file__).resolve().parents[1] / "docker-compose.yml"
+        if not compose_path.is_file():
+            self.skipTest(f"compose file not present in this image: {compose_path}")
+        compose_src = compose_path.read_text(encoding="utf-8")
         bot_defaults = _bot_environ_defaults(bot_src, names)
         compose_env = _compose_service_environment(compose_src, "openab-url-intake")
         for name in names:
