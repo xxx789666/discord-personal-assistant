@@ -77,6 +77,12 @@ MIN_BODY_CHARS = int(os.environ.get("MIN_BODY_CHARS", "300"))
 # text is lost the moment the LLMs are down (2026-09-07: 4808 characters
 # of captions pulled in 1.0s, then dropped on the floor).
 SOURCE_ONLY_EXCERPT_CHARS = int(os.environ.get("SOURCE_ONLY_EXCERPT_CHARS", "6000"))
+# 2026-09-14：模型偶爾回一份「合法但敷衍」的 JSON——title/summary/key_points
+# 有值就通過 parse_json_response，details_md 卻整個空著。markdown_note 於是拿模板句
+# 把它填掉，變成對來源的錯誤陳述：一支 4222 字的 YouTube 逐字稿被寫成「原文未提供
+# 更多可可靠抽取的細節」，而同一份逐字稿重跑三次都產出 881–1520 字的細節。那次只花
+# 8.9 秒，正常是 31–58 秒。來源夠長卻交不出細節，就當這次回應不合格、換下一個模型。
+MIN_DETAILS_SOURCE_CHARS = int(os.environ.get("MIN_DETAILS_SOURCE_CHARS", "2000"))
 # Anti-bot walls come back as HTTP 200 with a few hundred characters of prose.
 # They are long enough to pass a naive length check, so they must be recognised
 # and discarded explicitly, otherwise the fallback chain never runs.
@@ -801,6 +807,20 @@ def source_only_summary(source_type: str, text: str, failures: list[str]) -> dic
     })
 
 
+def is_thin_summary(result: dict, text: str) -> bool:
+    """True when a structurally valid response carries no detail at all.
+
+    parse_json_response only requires title, summary and key_points, so a model
+    that answers with those three and leaves details_md empty passes validation
+    and the note then asserts the source had nothing more to offer. That claim is
+    about the source, and it is false whenever the source was substantial. Short
+    sources are exempt: there genuinely may be nothing more to extract.
+    """
+    if len(text) < MIN_DETAILS_SOURCE_CHARS:
+        return False
+    return not str(result.get("details_md") or "").strip()
+
+
 def summarize(url: str, source_type: str, text: str, truncated: bool) -> dict:
     truncation_note = "來源過長，本次保留開頭與結尾。" if truncated else "來源未截斷。"
     prompt = f"""原始 URL：{url}
@@ -816,6 +836,7 @@ def summarize(url: str, source_type: str, text: str, truncated: bool) -> dict:
         if fallback_model and fallback_model not in models:
             models.append(fallback_model)
     failures: list[str] = []
+    best_thin: dict | None = None
     for model_index, model in enumerate(models):
         started = time.monotonic()
         payload = {
@@ -865,13 +886,37 @@ def summarize(url: str, source_type: str, text: str, truncated: bool) -> dict:
             if status in {401, 403}:
                 raise
             continue
+        elapsed = time.monotonic() - started
+        if is_thin_summary(result, text):
+            failures.append(f"{model}: 細節從缺")
+            log.warning(
+                "summary too thin model=%s source_chars=%d key_points=%d elapsed=%.1fs;"
+                " trying fallback",
+                model,
+                len(text),
+                len(result.get("key_points") or []),
+                elapsed,
+            )
+            # 留著最好的一份：敷衍摘要仍勝過完全沒有摘要，所以鏈跑完若全都敷衍，
+            # 就回傳重點最多的那一份，而不是退到只存原文的救援路徑。
+            if best_thin is None or len(result.get("key_points") or []) > len(
+                best_thin.get("key_points") or []
+            ):
+                best_thin = result
+            continue
         log.info(
             "summary complete model=%s source_chars=%d elapsed=%.1fs",
             model,
             len(text),
-            time.monotonic() - started,
+            elapsed,
         )
         return result
+    if best_thin is not None:
+        log.error(
+            "every summary model returned a thin summary; keeping the best one: %s",
+            "；".join(failures),
+        )
+        return best_thin
     log.error("all summary models failed; saving source-only fallback: %s", "；".join(failures))
     return source_only_summary(source_type, text, failures)
 
@@ -894,7 +939,11 @@ def markdown_note(url: str, source_type: str, meta: dict, author: str, truncated
     def bullets(items: list[str], empty: str) -> str:
         return "\n".join(f"- {item}" for item in items) if items else f"- {empty}"
 
-    details = str(meta.get("details_md") or "").strip() or "原文未提供更多可可靠抽取的細節。"
+    # 不要斷言「原文沒有細節」——那是關於來源的宣稱，而空的 details_md 只說明
+    # 這次摘要沒產出，兩者不是同一件事（2026-09-14）。
+    details = (
+        str(meta.get("details_md") or "").strip() or "本次摘要未產出細節段落。"
+    )
     return f'''---
 source: {json.dumps(url, ensure_ascii=False)}
 source_type: {meta.get("source_type") or source_type}

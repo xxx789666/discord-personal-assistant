@@ -1,4 +1,5 @@
 import importlib.util
+import json
 import os
 import re
 import tempfile
@@ -467,6 +468,89 @@ class UrlIntakeTests(unittest.TestCase):
             finally:
                 BOT.VAULT = original
         self.assertNotEqual(first.name, second.name)
+
+    def test_is_thin_summary_only_fires_on_substantial_sources(self):
+        # 短來源可能真的沒有更多可抽取的內容，不該被判為敷衍。
+        self.assertFalse(BOT.is_thin_summary({"details_md": ""}, "短"))
+        long_source = "字" * BOT.MIN_DETAILS_SOURCE_CHARS
+        self.assertTrue(BOT.is_thin_summary({"details_md": ""}, long_source))
+        blank = "  " + chr(10) + "  "  # 模型常見的「只回空白」形狀
+        self.assertTrue(BOT.is_thin_summary({"details_md": blank}, long_source))
+        self.assertTrue(BOT.is_thin_summary({}, long_source))
+        self.assertFalse(BOT.is_thin_summary({"details_md": "## 細節"}, long_source))
+
+    def _summary_response(self, payload):
+        response = Mock(status_code=200)
+        response.raise_for_status.return_value = None
+        response.json.return_value = {"choices": [{"message": {"content": payload}}]}
+        return response
+
+    def test_summarize_retries_when_a_model_returns_no_details(self):
+        # 2026-09-14：gpt-oss-20b 對一支 4222 字的逐字稿回了合法但沒有 details_md
+        # 的 JSON，8.9 秒就結束（正常 31–58 秒）。同一份逐字稿重跑三次都有細節，
+        # 所以那是一次敷衍回應，應該換模型而不是照單全收。
+        originals = (BOT.NVIDIA_MODEL, BOT.NVIDIA_FALLBACK_MODEL, BOT.NVIDIA_FINAL_FALLBACK_MODEL)
+        BOT.NVIDIA_MODEL = "primary/model"
+        BOT.NVIDIA_FALLBACK_MODEL = "fallback/model"
+        BOT.NVIDIA_FINAL_FALLBACK_MODEL = "final/model"
+        thin = self._summary_response(
+            '{"title":"T","summary":"S","key_points":["K"],"details_md":""}'
+        )
+        rich = self._summary_response(
+            json.dumps(
+                {
+                    "title": "T2",
+                    "summary": "S2",
+                    "key_points": ["K2"],
+                    "details_md": "## 細節" + chr(10) + "有內容",
+                },
+                ensure_ascii=False,
+            )
+        )
+        long_source = "字" * (BOT.MIN_DETAILS_SOURCE_CHARS + 10)
+        try:
+            with patch.object(BOT.requests, "post", side_effect=[thin, rich]) as post:
+                result = BOT.summarize("https://example.com", "youtube", long_source, False)
+        finally:
+            (BOT.NVIDIA_MODEL, BOT.NVIDIA_FALLBACK_MODEL, BOT.NVIDIA_FINAL_FALLBACK_MODEL) = originals
+        self.assertEqual(result["title"], "T2")
+        self.assertEqual(post.call_count, 2)
+
+    def test_summarize_keeps_the_richest_thin_summary_rather_than_dropping_to_source_only(self):
+        # 全部敷衍時仍要回傳最好的那一份：敷衍摘要勝過只存原文。
+        originals = (BOT.NVIDIA_MODEL, BOT.NVIDIA_FALLBACK_MODEL, BOT.NVIDIA_FINAL_FALLBACK_MODEL)
+        BOT.NVIDIA_MODEL = "primary/model"
+        BOT.NVIDIA_FALLBACK_MODEL = "fallback/model"
+        BOT.NVIDIA_FINAL_FALLBACK_MODEL = "final/model"
+        one_point = self._summary_response('{"title":"A","summary":"S","key_points":["a"]}')
+        three_points = self._summary_response(
+            '{"title":"B","summary":"S","key_points":["a","b","c"]}'
+        )
+        two_points = self._summary_response('{"title":"C","summary":"S","key_points":["a","b"]}')
+        long_source = "字" * (BOT.MIN_DETAILS_SOURCE_CHARS + 10)
+        try:
+            with patch.object(
+                BOT.requests, "post", side_effect=[one_point, three_points, two_points]
+            ) as post:
+                result = BOT.summarize("https://example.com", "youtube", long_source, False)
+        finally:
+            (BOT.NVIDIA_MODEL, BOT.NVIDIA_FALLBACK_MODEL, BOT.NVIDIA_FINAL_FALLBACK_MODEL) = originals
+        self.assertEqual(post.call_count, 3)
+        self.assertEqual(result["title"], "B")
+        # 不可以退到只存原文的救援路徑——那會把已經拿到的重點丟掉。
+        self.assertNotIn("原文節錄", str(result.get("details_md") or ""))
+
+    def test_markdown_note_does_not_claim_the_source_lacked_detail(self):
+        # 空的 details_md 只代表這次摘要沒產出，不代表原文沒有內容。
+        note = BOT.markdown_note(
+            "https://example.com",
+            "youtube",
+            {"title": "T", "summary": "S", "key_points": ["K"], "details_md": ""},
+            "tester",
+            False,
+        )
+        self.assertIn("本次摘要未產出細節段落。", note)
+        self.assertNotIn("原文未提供更多可可靠抽取的細節", note)
 
     def test_compose_env_parser_scopes_to_named_service(self):
         # compose 裡多個 service 都可能有 NVIDIA_*；全檔搜第一個會鎖錯鏈。
