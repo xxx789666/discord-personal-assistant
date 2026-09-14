@@ -83,6 +83,12 @@ SOURCE_ONLY_EXCERPT_CHARS = int(os.environ.get("SOURCE_ONLY_EXCERPT_CHARS", "600
 # 更多可可靠抽取的細節」，而同一份逐字稿重跑三次都產出 881–1520 字的細節。那次只花
 # 8.9 秒，正常是 31–58 秒。來源夠長卻交不出細節，就當這次回應不合格、換下一個模型。
 MIN_DETAILS_SOURCE_CHARS = int(os.environ.get("MIN_DETAILS_SOURCE_CHARS", "2000"))
+# 2026-09-14：X 貼文的影片以前完全沒被碰過——路由只讓 YouTube 走轉錄。一則
+# 253 字的西班牙文推文底下掛著 104 分鐘的 Stanford 課程，摘要出來的是那段推銷
+# 文案而不是課程內容。門檻 60 秒以下當迷因短片跳過（推文文字才是本體）；上限
+# 只是不讓超長影片把擷取卡住，真正的護欄是 media_transcript 的 24 MB 檢查。
+X_VIDEO_MIN_SECONDS = int(os.environ.get("X_VIDEO_MIN_SECONDS", "60"))
+X_VIDEO_MAX_SECONDS = int(os.environ.get("X_VIDEO_MAX_SECONDS", "14400"))
 # Anti-bot walls come back as HTTP 200 with a few hundred characters of prose.
 # They are long enough to pass a naive length check, so they must be recognised
 # and discarded explicitly, otherwise the fallback chain never runs.
@@ -244,8 +250,13 @@ def draftjs_to_markdown(content: object) -> str:
     return "\n\n".join(lines).strip()
 
 
-def fxtwitter_scrape(url: str) -> str:
-    """Fetch X/Twitter status text via FxTwitter, including embedded Articles."""
+def fxtwitter_scrape(url: str) -> tuple[str, float]:
+    """Status text plus the length of any attached video, in seconds.
+
+    The duration rides along in the same response as the text: FxTwitter already
+    reports media.videos[].duration, so knowing whether a post carries a video
+    worth transcribing costs no extra request. Returns 0.0 when there is none.
+    """
     status_id = x_status_id(url)
     if not status_id:
         raise RuntimeError("不是可辨識的 X／Twitter status URL")
@@ -297,7 +308,61 @@ def fxtwitter_scrape(url: str) -> str:
     result = "\n\n".join(part for part in parts if part).strip()
     if len(result) < 20:
         raise RuntimeError("FxTwitter 回傳內容過短")
-    return result
+    return result, fxtwitter_video_seconds(tweet)
+
+
+def fxtwitter_video_seconds(tweet: dict) -> float:
+    """Longest real video on the post, in seconds; 0.0 for none.
+
+    GIFs are reported as media too but carry no audio track, so only entries
+    typed "video" count.
+    """
+    media = tweet.get("media")
+    if not isinstance(media, dict):
+        return 0.0
+    longest = 0.0
+    for item in media.get("videos") or []:
+        if not isinstance(item, dict) or item.get("type") != "video":
+            continue
+        try:
+            longest = max(longest, float(item.get("duration") or 0))
+        except (TypeError, ValueError):
+            continue
+    return longest
+
+
+def x_video_transcript(url: str, video_seconds: float) -> str:
+    """Speech-recognised transcript of a video attached to an X post.
+
+    Returns "" rather than raising for every reason not to have one: intake must
+    keep the post text even when the video cannot be transcribed.
+    """
+    if video_seconds < X_VIDEO_MIN_SECONDS:
+        return ""
+    if video_seconds > X_VIDEO_MAX_SECONDS:
+        log.info(
+            "x video not transcribed for %s: %.0fs exceeds the %ds ceiling",
+            url,
+            video_seconds,
+            X_VIDEO_MAX_SECONDS,
+        )
+        return ""
+    try:
+        transcript = media_transcript(url).strip()
+    except Exception as exc:  # noqa: BLE001 - the post text still stands on its own
+        log.info("x video transcript unavailable for %s: %s", url, exc)
+        return ""
+    if not transcript:
+        return ""
+    log.info(
+        "x video transcribed for %s: %.0fs of audio into %d chars",
+        url,
+        video_seconds,
+        len(transcript),
+    )
+    # 標明是語音辨識：專有名詞會聽錯（2026-09-14 把「清零」聽成「金零」）。
+    # 摘要模型看得到這句提醒，之後讀 note 的人也看得到。
+    return "## 影片逐字稿（語音辨識，專有名詞可能有誤）\n\n" + transcript
 
 
 def youtube_captions(video_id: str) -> str | None:
@@ -639,7 +704,12 @@ def source_text(url: str) -> tuple[str, str]:
     # FxTwitter exposes status text and embedded Articles without a local browser.
     if is_x_host(host) and x_status_id(url):
         try:
-            take("FxTwitter", fxtwitter_scrape(url))
+            tweet_text, video_seconds = fxtwitter_scrape(url)
+            take("FxTwitter", tweet_text)
+            # 推文文字常常只是廣告詞，影片才是內容本體——兩個都留。
+            transcript = x_video_transcript(url, video_seconds)
+            if transcript:
+                text = (text + "\n\n" + transcript).strip()
             if len(text) >= 120:
                 return "x", text
         except Exception as exc:  # noqa: BLE001
