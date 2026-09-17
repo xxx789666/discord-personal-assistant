@@ -776,6 +776,34 @@ def truncate_source(text: str) -> tuple[str, bool]:
     return text[:head] + "\n\n[中段因長度限制省略]\n\n" + text[-tail:], True
 
 
+# 2026-09-17：gpt-oss-20b 偶爾把 markdown 的換行寫成 JSON 的 "\\n"（雙重轉義），
+# json.loads 解出來就只剩字面上的兩個字元。那天 gemma 逾時 120 秒才換它接手，一支
+# 387 秒的美股影片於是把整段 details_md 擠成一行：「## 9月美股走勢概覽\\n- **Fed
+# 9/16 加息**……」。九月 58 篇只有這一篇中招，因為平常輪不到 fallback 出手。
+_MARKDOWN_BLOCK_START = re.compile(r"(?:\A|\n)[ \t]*(?:#{1,6} |[-*+] |> |\||\d+[.)] )")
+
+
+def repair_escaped_newlines(value):
+    """Undo a model's double-escaped newlines, but only where they are unambiguous.
+
+    A field that carries markdown yet holds no real newline is broken by
+    definition—headings and bullets cannot render on a single line. Prose that
+    merely mentions the escape sequence once is left exactly as written.
+    """
+    if isinstance(value, list):
+        return [repair_escaped_newlines(item) for item in value]
+    if isinstance(value, dict):
+        return {key: repair_escaped_newlines(item) for key, item in value.items()}
+    if not isinstance(value, str):
+        return value
+    if "\n" in value or "\\n" not in value:
+        return value
+    repaired = value.replace("\\r\\n", "\n").replace("\\n", "\n")
+    if value.count("\\n") < 2 and not _MARKDOWN_BLOCK_START.search(repaired):
+        return value
+    return repaired
+
+
 def parse_json_response(text: str) -> dict:
     raw = (text or "").strip()
     fence = re.fullmatch(r"```(?:json)?\s*(.*?)\s*```", raw, re.DOTALL)
@@ -786,6 +814,7 @@ def parse_json_response(text: str) -> dict:
         if match:
             raw = match.group(0)
     data = json.loads(raw)
+    data = repair_escaped_newlines(data)
     for required in ("title", "summary", "key_points"):
         if not data.get(required):
             raise ValueError(f"模型輸出缺少 {required}")

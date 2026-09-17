@@ -690,6 +690,52 @@ class UrlIntakeTests(unittest.TestCase):
         self.assertTrue(text.endswith("尾"))
         self.assertLess(len(text), len(over))
 
+    def test_repair_escaped_newlines_rebuilds_a_flattened_markdown_block(self):
+        # 2026-09-17 那份真實的壞輸出：整段 details_md 只剩字面上的 \n。
+        broken = (
+            "## 9月美股走勢概覽\\n- **Fed 9/16 加息**：不確定性消除"
+            "\\n\\n## 技術面分析\\n- 8/17 形成頂部結構"
+        )
+        fixed = BOT.repair_escaped_newlines(broken)
+        self.assertNotIn("\\n", fixed)
+        self.assertEqual(fixed.splitlines()[0], "## 9月美股走勢概覽")
+        self.assertIn("\n\n## 技術面分析", fixed)
+
+    def test_repair_escaped_newlines_leaves_healthy_and_ambiguous_text_alone(self):
+        healthy = "## 標題\n- 一點\n- 兩點"
+        self.assertEqual(BOT.repair_escaped_newlines(healthy), healthy)
+        # 正文真的在談這個轉義字元，而且只提一次：不可以動它。
+        prose = "Python 用 \\n 當換行字元。"
+        self.assertEqual(BOT.repair_escaped_newlines(prose), prose)
+        # 同一段裡既有真換行、又有字面轉義 → 那個轉義是作者要的。
+        mixed = "第一行\n印出 \\n 就會換行"
+        self.assertEqual(BOT.repair_escaped_newlines(mixed), mixed)
+        # 已經排版正確、內容又剛好在講轉義字元的 markdown：真換行是它沒壞的證據，
+        # 光看「出現兩次 \n」會誤判成壞掉（少了這個案例，拿掉真換行守門也測不出來）。
+        teaching = "## 換行處理\n- Python 用 \\n 收尾\n- JavaScript 也用 \\n"
+        self.assertEqual(BOT.repair_escaped_newlines(teaching), teaching)
+
+    def test_repair_escaped_newlines_walks_nested_fields_and_keeps_non_strings(self):
+        data = {"key_points": ["甲\\n乙\\n丙"], "count": 3, "missing": None}
+        fixed = BOT.repair_escaped_newlines(data)
+        self.assertEqual(fixed["key_points"][0], "甲\n乙\n丙")
+        self.assertEqual(fixed["count"], 3)
+        self.assertIsNone(fixed["missing"])
+
+    def test_parse_json_response_repairs_a_double_escaped_details_block(self):
+        payload = json.dumps(
+            {
+                "title": "加息靴子落地",
+                "summary": "短期利好股市",
+                "key_points": ["標普500 9/1-9/16 跌 1%"],
+                "details_md": "## 概覽\\n- Fed 9/16 加息\\n- 標普跌 1%",
+            },
+            ensure_ascii=False,
+        )
+        parsed = BOT.parse_json_response(payload)
+        self.assertNotIn("\\n", parsed["details_md"])
+        self.assertEqual(len(parsed["details_md"].splitlines()), 3)
+
     def test_compose_env_parser_scopes_to_named_service(self):
         # compose 裡多個 service 都可能有 NVIDIA_*；全檔搜第一個會鎖錯鏈。
         yaml_text = """
