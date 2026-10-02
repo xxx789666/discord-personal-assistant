@@ -736,6 +736,101 @@ class UrlIntakeTests(unittest.TestCase):
         self.assertNotIn("\\n", parsed["details_md"])
         self.assertEqual(len(parsed["details_md"].splitlines()), 3)
 
+    def test_looks_blocked_catches_the_sec_rate_limit_page(self):
+        # 2026-09-17：這 465 字通過了 MIN_BODY_CHARS，整篇 note 於是在摘要錯誤頁。
+        sec_page = (
+            "SEC.gov | Request Rate Threshold Exceeded\n"
+            "Your Request Originates from an Undeclared Automated Tool\n"
+            "To allow for equitable access to all users, SEC reserves the right to "
+            "limit requests originating from undeclared automated tools.\n"
+            "Reference ID: 0.4c7f1ab8.1789655205.135fb455"
+        )
+        self.assertTrue(BOT.looks_blocked(sec_page))
+        # 一篇真的在報導這件事的文章不會被誤殺：它遠比封鎖頁長。
+        article = "SEC 擴大限制未申報自動化工具的存取。" * 400
+        self.assertGreater(len(article), BOT.BLOCK_PAGE_MAX_CHARS)
+        self.assertFalse(BOT.looks_blocked(article))
+
+    def test_direct_headers_declares_a_contact_only_where_it_is_required(self):
+        browser_ua = BOT.DIRECT_BROWSER_HEADERS["User-Agent"]
+        # 聯絡資訊由部署注入，測試自己釘一個，才不會隨 .local 的內容而變。
+        with patch.object(BOT, "DECLARED_UA_CONTACT", "someone@example.com"):
+            for url in (
+                "https://www.sec.gov/newsroom/press-releases/2026-90-innovation",
+                "https://sec.gov/cgi-bin/browse-edgar",
+            ):
+                ua = BOT.direct_headers(url)["User-Agent"]
+                self.assertIn("someone@example.com", ua, url)
+                self.assertNotEqual(ua, browser_ua, url)
+        # 其他網站維持瀏覽器字串：那是為了別的站才加的，不可以一起換掉。
+        with patch.object(BOT, "DECLARED_UA_CONTACT", "someone@example.com"):
+            for url in ("https://www.techorange.com/x", "https://example.com/a",
+                        "https://notsec.gov.example.com/a"):
+                self.assertEqual(BOT.direct_headers(url)["User-Agent"], browser_ua, url)
+            # 其餘標頭不因為換身分而掉。
+            self.assertEqual(
+                set(BOT.direct_headers("https://www.sec.gov/x")),
+                set(BOT.DIRECT_BROWSER_HEADERS),
+            )
+
+    def test_no_contact_configured_means_no_declaration_at_all(self):
+        """Half a declaration is worse than none: stay disguised, stay blocked.
+
+        The contact lives in gitignored .local/intake.env because the repo is
+        public, so an unconfigured deployment is a normal state, not a bug.
+        """
+        browser_ua = BOT.DIRECT_BROWSER_HEADERS["User-Agent"]
+        with patch.object(BOT, "DECLARED_UA_CONTACT", ""):
+            self.assertFalse(BOT.needs_declared_ua("www.sec.gov"))
+            self.assertEqual(
+                BOT.direct_headers("https://www.sec.gov/x")["User-Agent"], browser_ua
+            )
+
+    def test_direct_scrape_actually_sends_the_declared_ua(self):
+        """direct_headers() being right is worthless if the call site ignores it.
+
+        ensure_public_url is stubbed so the suite never needs DNS: this file also
+        runs as a Docker build step, where name resolution is not guaranteed.
+        """
+        body = (
+            "<html><head><title>SEC issues innovation exemption</title></head>"
+            "<body><article><p>"
+            + "The Commission today issued an innovation exemption to facilitate "
+              "the trading of tokenized NMS stock and requested public comment. " * 12
+            + "</p></article></body></html>"
+        ).encode("utf-8")
+        response = Mock()
+        response.is_redirect = False
+        response.status_code = 200
+        response.headers = {"Content-Type": "text/html; charset=utf-8"}
+        with patch.object(BOT, "ensure_public_url"), \
+             patch.object(BOT, "DECLARED_UA_CONTACT", "someone@example.com"), \
+             patch.object(BOT.requests, "get", return_value=response) as get, \
+             patch.object(BOT, "_read_limited_body", return_value=body):
+            text = BOT.direct_scrape(
+                "https://www.sec.gov/newsroom/press-releases/2026-90-innovation"
+            )
+        self.assertIn("tokenized NMS stock", text)
+        self.assertIn("someone@example.com", get.call_args.kwargs["headers"]["User-Agent"])
+
+    def test_a_reader_returning_the_sec_block_page_does_not_end_the_scrape_chain(self):
+        # 封鎖頁被丟掉後，鏈必須繼續往下走到 direct，而不是就這樣交差。
+        block = (
+            "SEC.gov | Request Rate Threshold Exceeded. Your Request Originates "
+            "from an Undeclared Automated Tool. Reference ID: 0.4c7f1ab8"
+        )
+        real = "SEC 今天發布創新豁免，便利代幣化 NMS 股票交易並徵求公眾意見。" * 20
+        with patch.object(BOT, "kitesurf_scrape", return_value=block), \
+             patch.object(BOT, "jina_scrape", return_value=block), \
+             patch.object(BOT, "direct_scrape", return_value=real) as direct:
+            kind, text = BOT.source_text(
+                "https://www.sec.gov/newsroom/press-releases/2026-90-innovation"
+            )
+        self.assertEqual(kind, "webpage")
+        self.assertNotIn("Undeclared Automated Tool", text)
+        self.assertIn("代幣化 NMS 股票", text)
+        direct.assert_called_once()
+
     def test_compose_env_parser_scopes_to_named_service(self):
         # compose 裡多個 service 都可能有 NVIDIA_*；全檔搜第一個會鎖錯鏈。
         yaml_text = """

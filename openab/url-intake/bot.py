@@ -123,6 +123,10 @@ BLOCK_PAGE_MARKERS = (
     "access denied",
     "請啟用 cookie",
     "您的請求已遭封鎖",
+    # 2026-09-17：SEC.gov 的 403 頁。措辭跟 Cloudflare 那一整排完全不重疊，所以
+    # 一則新聞稿的擷取結果是 465 字的封鎖頁，還通過了 MIN_BODY_CHARS 進到摘要。
+    "request rate threshold exceeded",
+    "undeclared automated tool",
 )
 # Direct scrape follows redirects itself so each hop can be re-checked.
 DIRECT_MAX_REDIRECTS = int(os.environ.get("DIRECT_MAX_REDIRECTS", "5"))
@@ -159,6 +163,47 @@ DIRECT_BROWSER_HEADERS = {
     "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
     "Accept-Language": "zh-TW,zh;q=0.9,en;q=0.8",
 }
+# 2026-09-17：SEC.gov 擋的不是「不像瀏覽器」，而是「沒表明身分」——它的存取政策
+# 要求自動化工具在 User-Agent 裡放聯絡方式，否則一律當未申報工具擋掉。實測同一
+# 個網址：上面那組 Chrome 字串回 403 的 1,923 bytes 封鎖頁，改成申報式 UA 回 200
+# 的 67,132 bytes 正文。偽裝成瀏覽器在這裡是反效果，所以只對指名的網域改身分，
+# 其餘維持瀏覽器字串（那是 2026-08-28 為了 techorange 才加的，不能一起動）。
+# 2026-10-02：聯絡資訊不寫進原始碼——這個 repo 是公開的，commit 進去等於永久
+# 公開一個私人信箱，而且進了 git 歷史就拔不掉。改從 gitignore 的
+# .local/intake.env 注入（範本見 .local/intake.env.example）。沒設定就完全不宣告
+# 身分、維持瀏覽器字串：sec.gov 會照樣被擋，但不會洩漏一個半套的身分。
+DECLARED_UA_CONTACT = os.environ.get("DECLARED_UA_CONTACT", "").strip()
+DECLARED_UA_HOSTS = tuple(
+    host.strip().lower()
+    for host in os.environ.get("DECLARED_UA_HOSTS", "sec.gov").split(",")
+    if host.strip()
+)
+if DECLARED_UA_HOSTS and not DECLARED_UA_CONTACT:
+    log.info(
+        "DECLARED_UA_CONTACT 未設定：%s 仍以瀏覽器 UA 直連，可能被擋；"
+        "在 .local/intake.env 填聯絡方式即可啟用申報式 UA",
+        ", ".join(DECLARED_UA_HOSTS),
+    )
+
+
+def needs_declared_ua(host: str) -> bool:
+    """True for a host whose policy wants the caller identified, not disguised."""
+    if not DECLARED_UA_CONTACT:
+        return False
+    host = (host or "").lower().rstrip(".")
+    return any(
+        host == domain or host.endswith("." + domain) for domain in DECLARED_UA_HOSTS
+    )
+
+
+def direct_headers(url: str) -> dict:
+    """Per-hop headers: a redirect off the declaring host drops the declaration."""
+    headers = dict(DIRECT_BROWSER_HEADERS)
+    if needs_declared_ua(urlparse(url).hostname or ""):
+        headers["User-Agent"] = (
+            f"url-intake/1.0 (personal research; {DECLARED_UA_CONTACT})"
+        )
+    return headers
 
 URL_RE = re.compile(r"https?://[^\s<>()\[\]{}\"'，。！？；：、]+", re.IGNORECASE)
 MD_LINK_RE = re.compile(r"\[([^\]]+)\]\([^)]+\)")
@@ -612,7 +657,7 @@ def direct_scrape(url: str) -> str:
         ensure_public_url(current)
         response = requests.get(
             current,
-            headers=DIRECT_BROWSER_HEADERS,
+            headers=direct_headers(current),
             timeout=90,
             stream=True,
             allow_redirects=False,

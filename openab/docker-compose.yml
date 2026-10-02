@@ -96,6 +96,9 @@ services:
       - ../.local/nvidia.env
       - ../.local/groq.env
       - ../.local/cloudflare.env
+      # DECLARED_UA_CONTACT：SEC.gov 要求自動化工具表明聯絡方式。放在 .local
+      # 而非這裡，因為這個 repo 是公開的（範本 .local/intake.env.example）。
+      - ../.local/intake.env
     environment:
       CHANNEL_ID: "1536220007657373806"
       ALLOWED_USERS: "843428445802725388,1488170559865884684"
