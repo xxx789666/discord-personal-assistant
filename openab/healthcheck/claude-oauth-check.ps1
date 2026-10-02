@@ -41,6 +41,30 @@ $Targets = @(
 
 if (-not (Test-Path $StateDir)) { New-Item -ItemType Directory -Path $StateDir | Out-Null }
 
+# ── log ───────────────────────────────────────────────────────────────────────
+# 2026-10-02：這支本來完全不寫 log。stdout 經 hidden_run.vbs 進隱藏視窗就消失，
+# 唯一的持久痕跡是 .last-alert，而它在「恢復正常」那條路上會被自己刪掉。於是排程
+# 跑失敗之後查不出當時發生了什麼：10-02 06:07（開機後 62 秒）那次回 exit 1，但
+# 06:12 手動重跑成功並順手刪掉節流檔，再也無法判斷有沒有送出假告警。同一個
+# .state 目錄裡另外三支 healthcheck 都有 log，只有這支沒有。
+$LogFile = Join-Path $StateDir 'claude-oauth-check.log'
+try {
+  if ((Test-Path $LogFile) -and (Get-Item $LogFile).Length -gt 1MB) {
+    Move-Item -Path $LogFile -Destination ($LogFile + '.1') -Force
+  }
+} catch {}
+
+function Write-Log {
+  param([string]$Message)
+  Write-Output $Message
+  # 寫 log 永遠不該讓檢查本身失敗（$ErrorActionPreference = 'Stop'）。
+  try {
+    Add-Content -Path $LogFile -Value (
+      "{0}  {1}" -f (Get-Date -Format 'yyyy-MM-dd HH:mm:ss'), $Message
+    ) -Encoding utf8
+  } catch {}
+}
+
 # ── 讀 token（只認 ASCII 大寫的 KEY=VALUE；檔案裡那行中文 key 會被略過）──────
 $Tokens = @{}
 foreach ($line in (Get-Content $EnvFile)) {
@@ -132,16 +156,36 @@ exit $rc
 '@
 
 $problems = 0
+Write-Log "=== claude-oauth-check run (Live=$Live) ==="
 
 foreach ($t in $Targets) {
   $name   = $t.Container
   $issues = @()
 
   # 1) 容器在跑嗎？
+  # ⚠ 2026-10-02：這裡原本把「docker 無回應」與「容器不存在」併成同一個 issue，
+  #    於是開機後 Docker 還沒就緒時必然誤報。實例：boot 06:05:59、排程 06:07:01
+  #    執行（+62 秒）、容器要到 06:08 才起來 → exit 1 並發出假告警，而 token
+  #    從頭到尾都是好的。沿用本檔下方 $DetectEnvToken 已經立下的紀律：合法答案
+  #    只有 true/false，其餘先確認 daemon 活著；確認不了就當探測失敗跳過。
+  #    刻意不動節流狀態檔，理由同下方兩處 SKIP。
   $r = Invoke-Cmd 'docker' @('inspect', '-f', '{{.State.Running}}', $name) 30
-  if ($r.Code -ne 0) {
-    $issues += "容器不存在或 docker 無回應：$(($r.Err).Trim())"
-  } elseif (($r.Out).Trim() -ne 'true') {
+  $running = ($r.Out).Trim()
+  if ($r.Code -ne 0 -or $running -notin @('true', 'false')) {
+    # 逾時＝9p 掛載卡住的形狀（見下方 2026-09-10 的註解），不是「容器不存在」；
+    # daemon 無回應＝開機中。兩者都是探測失敗，只有「daemon 活著且不是逾時」
+    # 才能確定容器真的不在。
+    $daemon = Invoke-Cmd 'docker' @('version', '--format', '{{.Server.Version}}') 20
+    if ($r.Code -eq 124) {
+      Write-Log "[SKIP] $name docker inspect 逾時（掛載卡住？）——略過本輪，交給 mount-watchdog"
+      continue
+    }
+    if ($daemon.Code -ne 0) {
+      Write-Log "[SKIP] $name 容器狀態無法判定，且 Docker daemon 無回應（開機中？）——略過本輪"
+      continue
+    }
+    $issues += "容器不存在（daemon 正常，inspect exit $($r.Code)）：$(($r.Err).Trim())"
+  } elseif ($running -ne 'true') {
     $issues += '容器沒有在跑（State.Running = false）'
   } else {
     # 2a) 這隻是不是已經改吃長效訂閱 token？
@@ -168,7 +212,7 @@ foreach ($t in $Targets) {
       } else {
         $why = "非預期輸出：$detectOut"
       }
-      Write-Output "[SKIP] $name 無法判定認證模式（$why）——略過認證檢查，交給 mount-watchdog"
+      Write-Log "[SKIP] $name 無法判定認證模式（$why）——略過認證檢查，交給 mount-watchdog"
       continue
     }
 
@@ -176,12 +220,12 @@ foreach ($t in $Targets) {
     # 檢查——那會拿遷移前的殘留憑證產生假告警。掛載本身由 mount-watchdog 負責。
     # 刻意不動節流狀態檔：若先前有真故障被節流，不該因為這次跳過就被清掉。
     if ($detectOut -eq 'UNREADABLE') {
-      Write-Output "[SKIP] $name config.toml 不可讀（掛載故障？）——略過認證檢查，交給 mount-watchdog"
+      Write-Log "[SKIP] $name config.toml 不可讀（掛載故障？）——略過認證檢查，交給 mount-watchdog"
       continue
     }
 
     if ($usingEnvToken) {
-      Write-Output "[NOTE] $name 走長效訂閱 token（環境變數），略過憑證檔檢查"
+      Write-Log "[NOTE] $name 走長效訂閱 token（環境變數），略過憑證檔檢查"
     } else {
       # 2b) OAuth access token 過期了嗎？（只在還走 .credentials.json 時有意義）
       $r = Invoke-Cmd 'docker' @('exec', $name, 'node', '-e', $ReadExpiry) 60
@@ -216,7 +260,7 @@ foreach ($t in $Targets) {
       $combined = ("$($r.Out)$($r.Err)").Trim()
       if ($combined -match "hit your limit|usage limit|rate.?limit|resets") {
         # 訂閱額度用完 —— 會自己恢復，不是認證故障，只記錄不通知。
-        Write-Output "[NOTE] $name 額度用完：$combined（非認證問題，略過）"
+        Write-Log "[NOTE] $name 額度用完：$combined（非認證問題，略過）"
       } elseif ($r.Code -ne 0 -or $combined -match "401|authentication_error|Failed to authenticate") {
         $issues += "實測 ``claude -p`` 失敗（exit $($r.Code)）：$combined"
       }
@@ -227,25 +271,25 @@ foreach ($t in $Targets) {
   if ($issues.Count -eq 0) {
     # 恢復正常就清掉節流狀態，下次再壞會立刻通知。
     Remove-Item $stateFile -Force -ErrorAction SilentlyContinue
-    Write-Output "[OK] $name"
+    Write-Log "[OK] $name"
     continue
   }
 
   $problems++
-  Write-Output "[FAIL] $name -- $($issues -join ' / ')"
+  Write-Log "[FAIL] $name -- $($issues -join ' / ')"
 
   # 節流：$RealertHours 小時內不重複發。
   if (Test-Path $stateFile) {
     $last = Get-Item $stateFile
     if (((Get-Date) - $last.LastWriteTime).TotalHours -lt $RealertHours) {
-      Write-Output "       (已於 $($last.LastWriteTime) 通知過，節流中)"
+      Write-Log "       (已於 $($last.LastWriteTime) 通知過，節流中)"
       continue
     }
   }
 
   $token = $Tokens[$t.TokenVar]
   if (-not $token) {
-    Write-Output "       (無法通知：$EnvFile 裡找不到 $($t.TokenVar))"
+    Write-Log "       (無法通知：$EnvFile 裡找不到 $($t.TokenVar))"
     continue
   }
 
@@ -263,10 +307,12 @@ foreach ($t in $Targets) {
   try {
     Send-DiscordAlert -Token $token -ChannelId $t.ChannelId -Text ($lines -join "`n")
     Set-Content -Path $stateFile -Value (Get-Date -Format 'o') -Encoding utf8
-    Write-Output '       (已發 Discord 通知)'
+    Write-Log '       (已發 Discord 通知)'
   } catch {
-    Write-Output "       (Discord 通知失敗：$($_.Exception.Message))"
+    Write-Log "       (Discord 通知失敗：$($_.Exception.Message))"
   }
 }
 
-exit $(if ($problems -gt 0) { 1 } else { 0 })
+$code = if ($problems -gt 0) { 1 } else { 0 }
+Write-Log "[EXIT] $code (problems=$problems)"
+exit $code
